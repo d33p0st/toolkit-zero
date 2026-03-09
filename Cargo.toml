@@ -1,6 +1,8 @@
 [package]
 name = "toolkit-zero"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
+description = "A feature-selective Rust utility toolkit — a growing collection of categorized utilities you can opt into via Cargo features, including only what you need."
+license = "MIT"
 
 [dependencies]
