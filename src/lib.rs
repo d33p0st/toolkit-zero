@@ -13,19 +13,21 @@
 //! 3. [Socket — server](#socket--server)
 //! 4. [Socket — client](#socket--client)
 //! 5. [Location](#location)
+//! 6. [Backend deps](#backend-deps-1)
 //!
 //! ---
 //!
 //! ## Feature flags
 //!
 //! | Feature | Enables | Exposes |
-//! |---|---|---|
+//! |---|---||---|
 //! | `serialization` | VEIL cipher (seal / open) | [`serialization`] |
 //! | `socket-server` | VEIL + typed HTTP server builder | [`socket::server`] |
 //! | `socket-client` | VEIL + typed HTTP client builder | [`socket::client`] |
 //! | `socket` | Both `socket-server` and `socket-client` | both |
 //! | `location-native` | Browser-based geolocation | [`location::browser`] |
 //! | `location` | Alias for `location-native` | [`location`] |
+//! | `backend-deps` | Re-exports all third-party deps used by each active module | `*::backend_deps` |
 //!
 //! ```toml
 //! [dependencies]
@@ -43,6 +45,9 @@
 //!
 //! # Geolocation (bundles socket-server automatically)
 //! toolkit-zero = { version = "2", features = ["location"] }
+//!
+//! # Re-export deps alongside socket-server
+//! toolkit-zero = { version = "2", features = ["socket-server", "backend-deps"] }
 //! ```
 //!
 //! ---
@@ -241,6 +246,28 @@
 //! The [`location::browser::PageTemplate`] enum controls what the user sees:
 //! a plain single-button page, a checkbox-gated variant, or a fully custom HTML
 //! document.
+//!
+//! ---
+//!
+//! ## Backend deps
+//!
+//! The `backend-deps` feature adds a `backend_deps` sub-module to every active
+//! module.  Each `backend_deps` module re-exports with `pub use` every
+//! third-party crate that its parent module uses internally.
+//!
+//! This lets downstream crates access those dependencies without declaring them
+//! separately in their own `Cargo.toml`.
+//!
+//! | Module | Path | Re-exports |
+//! |---|---|---|
+//! | serialization | [`serialization::backend_deps`] | `bincode`, `base64` |
+//! | socket (server) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `warp` |
+//! | socket (client) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
+//! | location | [`location::backend_deps`] | `tokio`, `serde`, `webbrowser` |
+//!
+//! `backend-deps` on its own (without any other feature) compiles but exposes
+//! nothing — the re-exports inside each `backend_deps` module are individually
+//! gated on their parent feature.
 
 #[cfg(any(feature = "socket", feature = "socket-server", feature = "socket-client"))]
 pub mod socket;

@@ -68,3 +68,6 @@ mod veil;
 
 pub use veil::{seal, open, SerializationError};
 pub use bincode::{Encode, Decode};
+
+#[cfg(feature = "backend-deps")]
+pub mod backend_deps;
