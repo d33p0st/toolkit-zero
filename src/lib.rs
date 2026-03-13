@@ -13,7 +13,8 @@
 //! 3. [Socket — server](#socket--server)
 //! 4. [Socket — client](#socket--client)
 //! 5. [Location](#location)
-//! 6. [Backend deps](#backend-deps-1)
+//! 6. [Encryption — Timelock](#encryption--timelock)
+//! 7. [Backend deps](#backend-deps-1)
 //!
 //! ---
 //!
@@ -27,27 +28,35 @@
 //! | `socket` | Both `socket-server` and `socket-client` | both |
 //! | `location-native` | Browser-based geolocation | [`location::browser`] |
 //! | `location` | Alias for `location-native` | [`location`] |
+//! | `enc-timelock-keygen-now` | Time-lock key derivation from the system clock | [`encryption::timelock::derive_key_now`] |
+//! | `enc-timelock-keygen-input` | Time-lock key derivation from a caller-supplied time | [`encryption::timelock::derive_key_at`] |
+//! | `enc-timelock-async-keygen-now` | Async variant of `enc-timelock-keygen-now` | [`encryption::timelock::derive_key_now_async`] |
+//! | `enc-timelock-async-keygen-input` | Async variant of `enc-timelock-keygen-input` | [`encryption::timelock::derive_key_at_async`] |
+//! | `encryption` | All four `enc-timelock-*` features | [`encryption::timelock`] |
 //! | `backend-deps` | Re-exports all third-party deps used by each active module | `*::backend_deps` |
 //!
 //! ```toml
 //! [dependencies]
 //! # Only the VEIL cipher
-//! toolkit-zero = { version = "2", features = ["serialization"] }
+//! toolkit-zero = { version = "3", features = ["serialization"] }
 //!
 //! # HTTP server only
-//! toolkit-zero = { version = "2", features = ["socket-server"] }
+//! toolkit-zero = { version = "3", features = ["socket-server"] }
 //!
 //! # HTTP client only
-//! toolkit-zero = { version = "2", features = ["socket-client"] }
+//! toolkit-zero = { version = "3", features = ["socket-client"] }
 //!
 //! # Both sides of the socket
-//! toolkit-zero = { version = "2", features = ["socket"] }
+//! toolkit-zero = { version = "3", features = ["socket"] }
 //!
 //! # Geolocation (bundles socket-server automatically)
-//! toolkit-zero = { version = "2", features = ["location"] }
+//! toolkit-zero = { version = "3", features = ["location"] }
+//!
+//! # Full time-lock encryption suite
+//! toolkit-zero = { version = "3", features = ["encryption"] }
 //!
 //! # Re-export deps alongside socket-server
-//! toolkit-zero = { version = "2", features = ["socket-server", "backend-deps"] }
+//! toolkit-zero = { version = "3", features = ["socket-server", "backend-deps"] }
 //! ```
 //!
 //! ---
@@ -249,6 +258,62 @@
 //!
 //! ---
 //!
+//! ## Encryption — Timelock
+//!
+//! The `encryption` feature (or any `enc-timelock-*` sub-feature) exposes a
+//! **time-locked key derivation** scheme.  A 32-byte key is derived from a
+//! time string through a three-pass KDF chain:
+//!
+//! > **Argon2id** (pass 1) → **scrypt** (pass 2) → **Argon2id** (pass 3)
+//!
+//! The key is only reproducible when the same time value, precision, format,
+//! and salts are provided.  Pair with an additional secret for a joint
+//! time ✕ passphrase security model.
+//!
+//! **Features:**
+//!
+//! | Feature | Function |
+//! |---|---|
+//! | `enc-timelock-keygen-now` | [`encryption::timelock::derive_key_now`] — derives from the system clock |
+//! | `enc-timelock-keygen-input` | [`encryption::timelock::derive_key_at`] — derives from a [`encryption::timelock::TimeLockTime`] you supply |
+//! | `enc-timelock-async-keygen-now` | [`encryption::timelock::derive_key_now_async`] — async, offloads KDF to a blocking thread |
+//! | `enc-timelock-async-keygen-input` | [`encryption::timelock::derive_key_at_async`] — async variant of `keygen-input` |
+//! | `encryption` | All four of the above |
+//!
+//! **Presets:** [`encryption::timelock::KdfPreset`] provides named parameter sets
+//! tuned per platform: `Balanced`, `Paranoid`, `BalancedMac`, `ParanoidMac`,
+//! `BalancedX86`, `ParanoidX86`, `BalancedArm`, `ParanoidArm`, and `Custom(KdfParams)`.
+//!
+//! ```rust,no_run
+//! use toolkit_zero::encryption::timelock::{
+//!     derive_key_at, KdfPreset, TimeLockSalts, TimeLockTime,
+//!     TimePrecision, TimeFormat,
+//! };
+//!
+//! // Encryption side — caller picks the unlock time
+//! let salts = TimeLockSalts::generate();
+//! let at    = TimeLockTime::new(14, 30).unwrap();
+//! let enc_key = derive_key_at(
+//!     at,
+//!     TimePrecision::Minute,
+//!     TimeFormat::Hour24,
+//!     &salts,
+//!     &KdfPreset::BalancedMac.params(),
+//! ).unwrap();
+//!
+//! // Decryption side — re-derives from the current clock
+//! use toolkit_zero::encryption::timelock::derive_key_now;
+//! let dec_key = derive_key_now(
+//!     TimePrecision::Minute,
+//!     TimeFormat::Hour24,
+//!     &salts,
+//!     &KdfPreset::BalancedMac.params(),
+//! ).unwrap();
+//! assert_eq!(enc_key.as_bytes(), dec_key.as_bytes());
+//! ```
+//!
+//! ---
+//!
 //! ## Backend deps
 //!
 //! The `backend-deps` feature adds a `backend_deps` sub-module to every active
@@ -263,7 +328,8 @@
 //! | serialization | [`serialization::backend_deps`] | `bincode`, `base64` |
 //! | socket (server) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `warp` |
 //! | socket (client) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
-//! | location | [`location::backend_deps`] | `tokio`, `serde`, `webbrowser` |
+//! | location | [`location::backend_deps`] | `tokio`, `serde`, `webbrowser`, `rand` |
+//! | encryption (timelock) | [`encryption::timelock::backend_deps`] | `argon2`, `scrypt`, `zeroize`, `chrono`, `rand`; `tokio` (async variants only) |
 //!
 //! `backend-deps` on its own (without any other feature) compiles but exposes
 //! nothing — the re-exports inside each `backend_deps` module are individually
@@ -277,3 +343,6 @@ pub mod location;
 
 #[cfg(feature = "serialization")]
 pub mod serialization;
+
+#[cfg(any(feature = "encryption", feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+pub mod encryption;

@@ -21,7 +21,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::Deserialize;
-use crate::socket::server::{Server, ServerMechanism};
+use crate::socket::server::{Server, ServerMechanism, SerializationKey};
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,7 +184,7 @@ impl std::fmt::Display for LocationError {
 
 impl std::error::Error for LocationError {}
 
-#[derive(Deserialize)]
+#[derive(Deserialize, bincode::Encode, bincode::Decode)]
 struct BrowserLocationBody {
     latitude:          f64,
     longitude:         f64,
@@ -196,7 +196,7 @@ struct BrowserLocationBody {
     timestamp:         f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, bincode::Encode, bincode::Decode)]
 struct BrowserErrorBody {
     code: u32,
     #[allow(dead_code)]
@@ -327,7 +327,12 @@ async fn capture(template: PageTemplate) -> Result<LocationData, LocationError> 
         .map_err(|_| LocationError::ServerError)?
         .port();
 
-    let html = render_page(&template);
+    use rand::Rng as _;
+    let mut rng = rand::rng();
+    let key: String = (0..16).map(|_| format!("{:02x}", rng.random::<u8>())).collect();
+    let skey = SerializationKey::Value(key.clone());
+
+    let html = render_page(&template, &key);
 
     // Shared state written by POST handlers, read after the server exits.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -344,8 +349,8 @@ async fn capture(template: PageTemplate) -> Result<LocationData, LocationError> 
 
     // ── POST /location — browser geolocation success ───────────────────────
     let post_route = ServerMechanism::post("/location")
-        .json::<BrowserLocationBody>()
         .state(Arc::clone(&state))
+        .encryption::<BrowserLocationBody>(skey.clone())
         .onconnect(
             |s: Arc<RwLock<GeoState>>, body: BrowserLocationBody| async move {
                 let mut lock = s.write().await;
@@ -370,8 +375,8 @@ async fn capture(template: PageTemplate) -> Result<LocationData, LocationError> 
 
     // ── POST /location-error — browser geolocation failure ────────────────
     let error_route = ServerMechanism::post("/location-error")
-        .json::<BrowserErrorBody>()
         .state(Arc::clone(&state))
+        .encryption::<BrowserErrorBody>(skey)
         .onconnect(
             |s: Arc<RwLock<GeoState>>, body: BrowserErrorBody| async move {
                 let mut lock = s.write().await;
@@ -425,8 +430,11 @@ async fn capture(template: PageTemplate) -> Result<LocationData, LocationError> 
 const CAPTURE_BUTTON: &str =
     r#"<button id="btn" onclick="requestLocation()">Share My Location</button>"#;
 
-/// JavaScript that handles geolocation and POSTs the result to the local
-/// server. Injected into every template (including `Custom`).
+/// JavaScript that handles geolocation and POSTs the VEIL-sealed result to
+/// the local server. Injected into every template (including `Custom`).
+/// Requires the VEIL cipher script (from [`veil_cipher_script`]) to be
+/// present on the page so that `window.sealLocation` and
+/// `window.sealLocationError` are available.
 const CAPTURE_JS: &str = r#"<script>
   var done = false;
   function setStatus(msg) {
@@ -443,8 +451,8 @@ const CAPTURE_JS: &str = r#"<script>
         var c = pos.coords;
         fetch('/location', {
           method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: window.sealLocation({
             latitude:          c.latitude,
             longitude:         c.longitude,
             accuracy:          c.accuracy,
@@ -464,8 +472,8 @@ const CAPTURE_JS: &str = r#"<script>
         if (done) return; done = true;
         fetch('/location-error', {
           method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: err.code, message: err.message })
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: window.sealLocationError({ code: err.code, message: err.message })
         }).then(function() {
           setStatus('\u274c ' + err.message + '. You may close this tab.');
         });
@@ -515,7 +523,132 @@ const TICKBOX_TOGGLE_JS: &str = r#"<script>
   }
 </script>"#;
 
-fn render_page(template: &PageTemplate) -> String {
+/// Generates a `<script>` block containing the full VEIL cipher JavaScript
+/// port. The runtime `key` is embedded as an obfuscated char-code array so
+/// it does not appear as a plain string in DevTools source view.
+///
+/// The script exposes two globals used by [`CAPTURE_JS`]:
+/// - `window.sealLocation(data)` — encodes and seals a location payload.
+/// - `window.sealLocationError(data)` — encodes and seals an error payload.
+///
+/// Both functions return a `Uint8Array` ready to POST as
+/// `application/octet-stream`. The sealed bytes are identical to what
+/// [`crate::serialization::seal`] produces with the same key, so the server
+/// route's `.encryption::<T>(SerializationKey::Value(key))` can decrypt them
+/// transparently.
+fn veil_cipher_script(key: &str) -> String {
+    let kc: String = key.bytes().map(|b| b.to_string()).collect::<Vec<_>>().join(",");
+    format!(r#"<script>(function(){{
+var _K=[{kc}].map(function(c){{return String.fromCharCode(c);}}).join('');
+function _sm(x){{
+  x=BigInt.asUintN(64,x+0x9e3779b97f4a7c15n);
+  x=BigInt.asUintN(64,(x^(x>>30n))*0xbf58476d1ce4e5b9n);
+  x=BigInt.asUintN(64,(x^(x>>27n))*0x94d049bb133111ebn);
+  return x^(x>>31n);
+}}
+function _fnv(b){{
+  var h=0xcbf29ce484222325n,P=0x100000001b3n;
+  for(var i=0;i<b.length;i++) h=BigInt.asUintN(64,(h^BigInt(b[i]))*P);
+  return h;}}
+function _ks(k){{
+  var kb=new TextEncoder().encode(k);
+  var h0=_fnv(kb);
+  var h1=_sm(BigInt.asUintN(64,h0^0xdeadbeefcafebaben));
+  var sx=new Uint8Array(256);
+  for(var i=0;i<256;i++) sx[i]=i;
+  var r=h0;
+  for(var i=255;i>=1;i--){{
+    r=_sm(r);
+    var j=Number(r%BigInt(i+1));
+    var t=sx[i];sx[i]=sx[j];sx[j]=t;
+  }}
+  var ss=h1;
+  var sh=_sm(BigInt.asUintN(64,h1^0x1234567890abcdefn));
+  function sb(pos){{
+    var s=BigInt.asUintN(64,BigInt.asUintN(64,ss+BigInt(pos))*0x9e3779b97f4a7c15n);
+    var v=_sm(s);
+    return Number((v>>32n)^(v&0xffffffffn))&0xff;
+  }}
+  function pm(bi,len){{
+    var sd=BigInt.asUintN(64,BigInt.asUintN(64,sh+BigInt(bi))*0x6c62272e07bb0142n);
+    var p=[];
+    for(var i=0;i<len;i++) p.push(i);
+    var rr=_sm(sd);
+    for(var i=len-1;i>=1;i--){{
+      rr=_sm(rr);
+      var j=Number(rr%BigInt(i+1));
+      var t=p[i];p[i]=p[j];p[j]=t;
+    }}
+    return p;
+  }}
+  return{{sx:sx,sb:sb,pm:pm}};
+}}
+function _enc(plain){{
+  var ks=_ks(_K),b=new Uint8Array(plain.length);
+  for(var i=0;i<plain.length;i++) b[i]=ks.sx[plain[i]];
+  for(var i=0;i<b.length;i++) b[i]^=ks.sb(i);
+  var prev=0xA7;
+  for(var i=0;i<b.length;i++){{
+    var orig=b[i];
+    var mix=((((i&0xff)+prev)&0xff)*0x6b)&0xff;
+    b[i]=(b[i]^mix)&0xff;
+    prev=orig;
+  }}
+  var acc=0xB3;
+  for(var i=0;i<b.length;i++){{
+    var out=(b[i]^acc)&0xff;
+    acc=(((acc<<3)|(acc>>5))^out)&0xff;
+    b[i]=out;
+  }}
+  var BK=16,n=b.length,full=Math.floor(n/BK);
+  for(var bi=0;bi<full;bi++){{
+    var p=ks.pm(bi,BK),base=bi*BK,blk=b.slice(base,base+BK);
+    for(var i=0;i<BK;i++) b[base+i]=blk[p[i]];
+  }}
+  var ts=full*BK,tl=n-ts;
+  if(tl>1){{
+    var p=ks.pm(full,tl),tail=b.slice(ts);
+    for(var i=0;i<tl;i++) b[ts+i]=tail[p[i]];
+  }}
+  return b;
+}}
+var _f64b=new ArrayBuffer(8),_f64v=new DataView(_f64b);
+function _f64(v){{_f64v.setFloat64(0,v,true);return new Uint8Array(_f64b.slice(0));}}
+function _cat(arrays){{
+  var len=0,off=0;
+  for(var i=0;i<arrays.length;i++) len+=arrays[i].length;
+  var out=new Uint8Array(len);
+  for(var i=0;i<arrays.length;i++){{out.set(arrays[i],off);off+=arrays[i].length;}}
+  return out;
+}}
+function _opt(v){{
+  return(v===null||v===undefined)?new Uint8Array([0]):_cat([new Uint8Array([1]),_f64(v)]);
+}}
+function _vi(n){{
+  if(n<251) return new Uint8Array([n]);
+  if(n<65536) return new Uint8Array([251,n&0xff,(n>>8)&0xff]);
+  if(n<4294967296) return new Uint8Array([252,n&0xff,(n>>8)&0xff,(n>>16)&0xff,(n>>24)&0xff]);
+  var bn=BigInt(n);
+  return new Uint8Array([253,Number(bn&0xffn),Number((bn>>8n)&0xffn),Number((bn>>16n)&0xffn),
+    Number((bn>>24n)&0xffn),Number((bn>>32n)&0xffn),Number((bn>>40n)&0xffn),
+    Number((bn>>48n)&0xffn),Number((bn>>56n)&0xffn)]);
+}}
+function _wrap(b){{return _cat([_vi(b.length),b]);}}
+window.sealLocation=function(d){{
+  return _wrap(_enc(_cat([
+    _f64(d.latitude),_f64(d.longitude),_f64(d.accuracy),
+    _opt(d.altitude),_opt(d.altitude_accuracy),_opt(d.heading),_opt(d.speed),
+    _f64(d.timestamp)
+  ])));
+}};
+window.sealLocationError=function(d){{
+  var mb=new TextEncoder().encode(d.message);
+  return _wrap(_enc(_cat([_vi(d.code),_vi(mb.length),mb])));
+}};
+}})();</script>"#, kc = kc)
+}
+
+fn render_page(template: &PageTemplate, key: &str) -> String {
     match template {
         PageTemplate::Default { title, body_text } => {
             let title = title.as_deref().unwrap_or("Location Access");
@@ -524,6 +657,7 @@ fn render_page(template: &PageTemplate) -> String {
                  location. Click <strong>Share My Location</strong> and allow \
                  access when the browser asks.",
             );
+            let veil_js = veil_cipher_script(key);
             format!(
                 r#"<!DOCTYPE html>
 <html lang="en">
@@ -541,6 +675,7 @@ fn render_page(template: &PageTemplate) -> String {
     {CAPTURE_BUTTON}
     <div id="status"></div>
   </div>
+  {veil_js}
   {CAPTURE_JS}
 </body>
 </html>"#
@@ -559,6 +694,7 @@ fn render_page(template: &PageTemplate) -> String {
             // The capture button is disabled by default; toggleBtn() enables it.
             let tickbox_button =
                 r#"<button id="btn" onclick="requestLocation()" disabled>Share My Location</button>"#;
+            let veil_js = veil_cipher_script(key);
             format!(
                 r#"<!DOCTYPE html>
 <html lang="en">
@@ -581,6 +717,7 @@ fn render_page(template: &PageTemplate) -> String {
     <div id="status"></div>
   </div>
   {TICKBOX_TOGGLE_JS}
+  {veil_js}
   {CAPTURE_JS}
 </body>
 </html>"#
@@ -590,11 +727,16 @@ fn render_page(template: &PageTemplate) -> String {
         PageTemplate::Custom(html) => {
             // Replace the first {} with the capture button.
             let with_button = html.replacen("{}", CAPTURE_BUTTON, 1);
-            // Inject the JS before </body>; fall back to appending.
+            // Inject the VEIL cipher script then CAPTURE_JS before </body>,
+            // mirroring how the button is injected. The cipher script must
+            // come first so that sealLocation / sealLocationError are defined
+            // before the geolocation handler runs.
+            let veil_js = veil_cipher_script(key);
+            let inject = format!("{veil_js}\n{CAPTURE_JS}\n</body>");
             if with_button.contains("</body>") {
-                with_button.replacen("</body>", &format!("{CAPTURE_JS}\n</body>"), 1)
+                with_button.replacen("</body>", &inject, 1)
             } else {
-                format!("{with_button}\n{CAPTURE_JS}")
+                format!("{with_button}\n{veil_js}\n{CAPTURE_JS}")
             }
         }
     }

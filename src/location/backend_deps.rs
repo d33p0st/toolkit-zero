@@ -13,3 +13,6 @@ pub use serde;
 
 #[cfg(feature = "location-native")]
 pub use webbrowser;
+
+#[cfg(feature = "location-native")]
+pub use rand;
