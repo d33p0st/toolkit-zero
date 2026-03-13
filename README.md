@@ -51,6 +51,7 @@ A feature-selective Rust utility toolkit. Pull in only the modules you need via 
 | `socket` | Both `socket-server` and `socket-client` | both socket sub-modules |
 | `location-native` | Browser-based geolocation (includes `socket-server`) | `toolkit_zero::location::browser` |
 | `location` | Alias for `location-native` | `toolkit_zero::location` |
+| `backend-deps` | Re-exports all third-party deps used by each active module | `*::backend_deps` |
 
 Add to `Cargo.toml`:
 
@@ -70,6 +71,9 @@ toolkit-zero = { version = "2", features = ["socket"] }
 
 # Geolocation (pulls in socket-server automatically)
 toolkit-zero = { version = "2", features = ["location"] }
+
+# Re-export deps alongside socket-server
+toolkit-zero = { version = "2", features = ["socket-server", "backend-deps"] }
 ```
 
 ---
@@ -549,6 +553,40 @@ let _data = __location__(PageTemplate::Custom(html.into()));
 | `PositionUnavailable` | Device cannot determine its position |
 | `Timeout` | No fix within the browser's built-in 30 s timeout |
 | `ServerError` | Failed to start the local HTTP server or Tokio runtime |
+
+---
+
+## Backend deps
+
+Feature: `backend-deps`
+
+When combined with any other feature, `backend-deps` adds a `backend_deps` sub-module to every active module. Each `backend_deps` module re-exports (via `pub use`) every third-party crate that its parent uses internally.
+
+This lets downstream crates access those dependencies without declaring them separately in their own `Cargo.toml`.
+
+| Module | Path | Re-exports |
+|---|---|---|
+| `serialization` | `toolkit_zero::serialization::backend_deps` | `bincode`, `base64` |
+| `socket` (server side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `warp` |
+| `socket` (client side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
+| `location` | `toolkit_zero::location::backend_deps` | `tokio`, `serde`, `webbrowser` |
+
+Each re-export inside `backend_deps` is individually gated on its parent feature, so only the deps that are actually compiled appear.  Enabling `backend-deps` alone (without any other feature) compiles cleanly but exposes nothing.
+
+```toml
+# Example: socket-server + dep re-exports
+toolkit-zero = { version = "2", features = ["socket-server", "backend-deps"] }
+```
+
+Then in your code:
+
+```rust
+// Access warp directly through toolkit-zero
+use toolkit_zero::socket::backend_deps::warp;
+
+// Access bincode through serialization
+use toolkit_zero::serialization::backend_deps::bincode;
+```
 
 ---
 
