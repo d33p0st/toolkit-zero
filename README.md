@@ -32,6 +32,10 @@ A feature-selective Rust utility toolkit. Pull in only the modules you need via 
    - [Page templates](#page-templates)
    - [LocationData fields](#locationdata-fields)
    - [Errors](#locationerror-variants)
+7. [Encryption — Timelock](#encryption--timelock)
+   - [Features](#timelock-features)
+   - [KDF presets](#kdf-presets)
+   - [Usage](#timelock-usage)
 
 ---
 
@@ -51,6 +55,11 @@ A feature-selective Rust utility toolkit. Pull in only the modules you need via 
 | `socket` | Both `socket-server` and `socket-client` | both socket sub-modules |
 | `location-native` | Browser-based geolocation (includes `socket-server`) | `toolkit_zero::location::browser` |
 | `location` | Alias for `location-native` | `toolkit_zero::location` |
+| `enc-timelock-keygen-now` | Time-lock key derivation from the system clock | `toolkit_zero::encryption::timelock` |
+| `enc-timelock-keygen-input` | Time-lock key derivation from a caller-supplied time | `toolkit_zero::encryption::timelock` |
+| `enc-timelock-async-keygen-now` | Async variant of `enc-timelock-keygen-now` | `toolkit_zero::encryption::timelock` |
+| `enc-timelock-async-keygen-input` | Async variant of `enc-timelock-keygen-input` | `toolkit_zero::encryption::timelock` |
+| `encryption` | All four `enc-timelock-*` features | `toolkit_zero::encryption::timelock` |
 | `backend-deps` | Re-exports all third-party deps used by each active module | `*::backend_deps` |
 
 Add to `Cargo.toml`:
@@ -58,22 +67,25 @@ Add to `Cargo.toml`:
 ```toml
 [dependencies]
 # VEIL cipher only
-toolkit-zero = { version = "2", features = ["serialization"] }
+toolkit-zero = { version = "3", features = ["serialization"] }
 
 # HTTP server only
-toolkit-zero = { version = "2", features = ["socket-server"] }
+toolkit-zero = { version = "3", features = ["socket-server"] }
 
 # HTTP client only
-toolkit-zero = { version = "2", features = ["socket-client"] }
+toolkit-zero = { version = "3", features = ["socket-client"] }
 
 # Both sides
-toolkit-zero = { version = "2", features = ["socket"] }
+toolkit-zero = { version = "3", features = ["socket"] }
 
 # Geolocation (pulls in socket-server automatically)
-toolkit-zero = { version = "2", features = ["location"] }
+toolkit-zero = { version = "3", features = ["location"] }
+
+# Full time-lock encryption suite
+toolkit-zero = { version = "3", features = ["encryption"] }
 
 # Re-export deps alongside socket-server
-toolkit-zero = { version = "2", features = ["socket-server", "backend-deps"] }
+toolkit-zero = { version = "3", features = ["socket-server", "backend-deps"] }
 ```
 
 ---
@@ -556,6 +568,73 @@ let _data = __location__(PageTemplate::Custom(html.into()));
 
 ---
 
+## Encryption — Timelock
+
+Feature: `encryption` (or any `enc-timelock-*` sub-feature)
+
+Derives a 32-byte time-locked key through a three-pass RAM-hard KDF chain:
+
+> **Argon2id** (pass 1) → **scrypt** (pass 2) → **Argon2id** (pass 3)
+
+The key is only reproducible at the right time with the right salts.  Paired with a passphrase (joint KDF), the search space becomes **time-window × passphrase-space** — extremely expensive to brute-force.
+
+### Timelock features
+
+| Feature | Sync/Async | Entry point |
+|---|---|---|
+| `enc-timelock-keygen-now` | sync | `derive_key_now` — reads the system clock |
+| `enc-timelock-keygen-input` | sync | `derive_key_at` — caller supplies `TimeLockTime` |
+| `enc-timelock-async-keygen-now` | async | `derive_key_now_async` |
+| `enc-timelock-async-keygen-input` | async | `derive_key_at_async` |
+| `encryption` | both | all four above |
+
+### KDF presets
+
+[`KdfPreset`](https://docs.rs/toolkit-zero) provides named parameter sets calibrated per platform:
+
+| Preset | Peak RAM | Platform |
+|---|---|---|
+| `Fast` / `FastMac` / `FastX86` / `FastArm` | ~64 MiB | Dev / CI only |
+| `Balanced` / `BalancedX86` | ~128 MiB | Cross-platform / x86-64 production |
+| `BalancedArm` | ~256 MiB | Linux ARM64 production |
+| `BalancedMac` / `Paranoid` / `ParanoidX86` / `ParanoidArm` | ~512 MiB | Mac production / cross-platform max |
+| `ParanoidMac` | ~1 GiB | macOS max security (~4 s on M2) |
+| `Custom(KdfParams)` | user-defined | Fully manual |
+
+### Timelock usage
+
+```rust
+use toolkit_zero::encryption::timelock::{
+    derive_key_at, derive_key_now,
+    KdfPreset, TimeLockSalts, TimeLockTime,
+    TimePrecision, TimeFormat,
+};
+
+// ── Encryption side ── caller sets the unlock time
+let salts   = TimeLockSalts::generate();          // store in ciphertext header
+let at      = TimeLockTime::new(14, 30).unwrap();
+let enc_key = derive_key_at(
+    at,
+    TimePrecision::Minute,
+    TimeFormat::Hour24,
+    &salts,
+    &KdfPreset::BalancedMac.params(),             // ~2 s on M2
+).unwrap();
+
+// ── Decryption side ── re-derives from the live clock
+let dec_key = derive_key_now(
+    TimePrecision::Minute,
+    TimeFormat::Hour24,
+    &salts,
+    &KdfPreset::BalancedMac.params(),
+).unwrap();
+assert_eq!(enc_key.as_bytes(), dec_key.as_bytes());
+```
+
+For async usage replace `derive_key_at` / `derive_key_now` with their `_async` variants (feature `enc-timelock-async-keygen-*`); salts and params are taken by value.
+
+---
+
 ## Backend deps
 
 Feature: `backend-deps`
@@ -569,13 +648,14 @@ This lets downstream crates access those dependencies without declaring them sep
 | `serialization` | `toolkit_zero::serialization::backend_deps` | `bincode`, `base64` |
 | `socket` (server side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `warp` |
 | `socket` (client side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
-| `location` | `toolkit_zero::location::backend_deps` | `tokio`, `serde`, `webbrowser` |
+| `location` | `toolkit_zero::location::backend_deps` | `tokio`, `serde`, `webbrowser`, `rand` |
+| `encryption` (timelock) | `toolkit_zero::encryption::timelock::backend_deps` | `argon2`, `scrypt`, `zeroize`, `chrono`, `rand`; `tokio` (async variants only) |
 
 Each re-export inside `backend_deps` is individually gated on its parent feature, so only the deps that are actually compiled appear.  Enabling `backend-deps` alone (without any other feature) compiles cleanly but exposes nothing.
 
 ```toml
 # Example: socket-server + dep re-exports
-toolkit-zero = { version = "2", features = ["socket-server", "backend-deps"] }
+toolkit-zero = { version = "3", features = ["socket-server", "backend-deps"] }
 ```
 
 Then in your code:

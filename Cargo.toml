@@ -1,25 +1,34 @@
 [package]
 name = "toolkit-zero"
-version = "2.1.0"
+version = "3.0.0"
 edition = "2024"
+rust-version = "1.85"
 description = "A feature-selective Rust utility toolkit — a growing collection of categorized utilities you can opt into via Cargo features, including only what you need."
 license = "MIT"
 repository = "https://github.com/d33p0st/toolkit-zero.git"
 homepage = "https://d33p0st.github.io/toolkit-zero/"
+documentation = "https://docs.rs/toolkit-zero"
 readme = "README.md"
+keywords = ["encryption", "kdf", "timelock", "socket", "geolocation"]
+categories = ["cryptography", "network-programming", "web-programming"]
+exclude = ["target/", ".github/", "*.d"]
 
 [dependencies]
-base64 = { version = "0.22", optional = true }
+argon2  = { version = "0.5", optional = true, features = ["zeroize"] }
+base64  = { version = "0.22", optional = true }
 bincode = { version = "2", optional = true }
-bytes = { version = "1", optional = true }
-log = { version = "0.4.29", optional = true }
+bytes   = { version = "1", optional = true }
+chrono  = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+log     = { version = "0.4.29", optional = true }
+rand    = { version = "0.9", optional = true }
 reqwest = { version = "0.13.2", optional = true, features = ["blocking", "json", "query"] }
-serde = { version = "1.0.228", optional = true }
-serde_json = { version = "1", optional = true }
+scrypt  = { version = "0.11", optional = true }
+serde   = { version = "1.0.228", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
-tokio = { version = "1.50.0", features = ["rt", "sync", "net"], optional = true }
-warp = { version = "0.4.2", optional = true }
+tokio   = { version = "1.50.0", features = ["rt", "sync", "net"], optional = true }
+warp    = { version = "0.4.2", optional = true }
 webbrowser = { version = "0.8", optional = true }
+zeroize = { version = "1", optional = true, features = ["derive"] }
 
 [features]
 default = []
@@ -52,5 +61,10 @@ socket-client = [
     "dep:log",
 ]
 location = ["location-native"]
-location-native = ["socket-server", "dep:webbrowser", "dep:tokio", "tokio/rt", "tokio/sync", "dep:serde"]
+location-native = ["socket-server", "dep:webbrowser", "dep:tokio", "tokio/rt", "tokio/sync", "dep:serde", "dep:rand"]
+encryption = ["enc-timelock-keygen-now", "enc-timelock-keygen-input", "enc-timelock-async-keygen-now", "enc-timelock-async-keygen-input"]
+enc-timelock-keygen-now = ["dep:argon2", "dep:scrypt", "dep:zeroize", "dep:chrono", "dep:rand"]
+enc-timelock-keygen-input = ["dep:argon2", "dep:scrypt", "dep:zeroize", "dep:chrono", "dep:rand"]
+enc-timelock-async-keygen-now = ["enc-timelock-keygen-now", "dep:tokio", "tokio/rt"]
+enc-timelock-async-keygen-input = ["enc-timelock-keygen-input", "dep:tokio", "tokio/rt"]
 backend-deps = []
