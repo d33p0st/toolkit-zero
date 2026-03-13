@@ -1,7 +1,55 @@
 
+//! Typed, fluent HTTP server construction.
+//!
+//! This module provides a builder-oriented API for declaring HTTP routes and
+//! serving them with [`warp`] under the hood. The entry point for every route
+//! is [`ServerMechanism`], which pairs an HTTP method with a URL path and
+//! supports incremental enrichment — attaching a JSON body expectation, URL
+//! query parameter deserialisation, or shared state — before being finalised
+//! into a [`SocketType`] route handle via `onconnect`.
+//!
+//! Completed routes are registered on a [`Server`] and served with a single
+//! `.await`. Graceful shutdown is available via
+//! [`Server::serve_with_graceful_shutdown`] and [`Server::serve_from_listener`].
+//!
+//! # Builder chains at a glance
+//!
+//! | Chain | Handler receives |
+//! |---|---|
+//! | `mechanism(method, path).onconnect(f)` | nothing |
+//! | `.json::<T>().onconnect(f)` | `T: DeserializeOwned` |
+//! | `.query::<T>().onconnect(f)` | `T: DeserializeOwned` |
+//! | `.state(s).onconnect(f)` | `S: Clone + Send + Sync` |
+//! | `.state(s).json::<T>().onconnect(f)` | `(S, T)` |
+//! | `.state(s).query::<T>().onconnect(f)` | `(S, T)` |
+//!
+//! For blocking handlers (not recommended in production) every finaliser also
+//! has an unsafe `onconnect_sync` counterpart.
+//!
+//! # Response helpers
+//!
+//! Use the [`reply!`] macro as the most concise way to build a response:
+//!
+//! ```rust,no_run
+//! # use toolkit_zero::socket::server::*;
+//! # use serde::Serialize;
+//! # #[derive(Serialize)] struct Item { id: u32 }
+//! # let item = Item { id: 1 };
+//! // 200 OK, empty body
+//! // reply!()
+//!
+//! // 200 OK, JSON body
+//! // reply!(json => item)
+//!
+//! // 201 Created, JSON body
+//! // reply!(json => item, status => Status::Created)
+//! ```
+
 use std::{future::Future, net::SocketAddr};
 use serde::{de::DeserializeOwned, Serialize};
 use warp::{Filter, Rejection, Reply, filters::BoxedFilter};
+
+pub use super::SerializationKey;
 
 /// A fully assembled, type-erased HTTP route ready to be registered on a [`Server`].
 ///
@@ -134,9 +182,18 @@ impl ServerMechanism {
     /// Creates a route matching HTTP `OPTIONS` requests at `path`.
     pub fn options(path: impl Into<String>) -> Self { Self::instance(HttpMethod::Options, path) }
 
-    /// Attaches shared state `S`, transitioning to [`StatefulSocketBuilder`].
+    /// Attaches shared state `S` to this route, transitioning to [`StatefulSocketBuilder`].
     ///
-    /// `S` must be `Clone + Send + Sync + 'static`. Wrap mutable state in `Arc<Mutex<_>>` or similar.
+    /// A fresh clone of `S` is injected into the handler on every request.  For mutable
+    /// shared state, wrap the inner value in `Arc<Mutex<_>>` or `Arc<RwLock<_>>` before
+    /// passing it here — only the outer `Arc` is cloned per request; the inner data stays
+    /// shared across all requests.
+    ///
+    /// `S` must be `Clone + Send + Sync + 'static`.
+    ///
+    /// From [`StatefulSocketBuilder`] you can further add a JSON body (`.json`), query
+    /// parameters (`.query`), or encryption (`.encryption` / `.encrypted_query`) before
+    /// finalising with `onconnect`.
     ///
     /// # Example
     /// ```rust,no_run
@@ -156,7 +213,16 @@ impl ServerMechanism {
         StatefulSocketBuilder { base: self, state }
     }
 
-    /// Expects a JSON-encoded request body of type `T`, transitioning to [`JsonSocketBuilder`].
+    /// Declares that this route expects a JSON-encoded request body, transitioning to
+    /// [`JsonSocketBuilder`].
+    ///
+    /// On each incoming request the body is parsed as `Content-Type: application/json`
+    /// and deserialised into `T`.  If the body is absent, malformed, or fails to
+    /// deserialise, the request is rejected before the handler is ever called.
+    /// When you subsequently call [`onconnect`](JsonSocketBuilder::onconnect), the handler
+    /// receives a fully-deserialised, ready-to-use `T`.
+    ///
+    /// `T` must implement `serde::de::DeserializeOwned`.
     ///
     /// # Example
     /// ```rust,no_run
@@ -174,7 +240,15 @@ impl ServerMechanism {
         JsonSocketBuilder { base: self, _phantom: std::marker::PhantomData }
     }
 
-    /// Expects URL query parameters deserialising into `T`, transitioning to [`QuerySocketBuilder`].
+    /// Declares that this route extracts its input from URL query parameters, transitioning
+    /// to [`QuerySocketBuilder`].
+    ///
+    /// On each incoming request the query string (`?field=value&...`) is deserialised into
+    /// `T`.  A missing or malformed query string is rejected before the handler is called.
+    /// When you subsequently call [`onconnect`](QuerySocketBuilder::onconnect), the handler
+    /// receives a fully-deserialised, ready-to-use `T`.
+    ///
+    /// `T` must implement `serde::de::DeserializeOwned`.
     ///
     /// # Example
     /// ```rust,no_run
@@ -193,11 +267,68 @@ impl ServerMechanism {
         QuerySocketBuilder { base: self, _phantom: std::marker::PhantomData }
     }
 
-    /// Attaches an async handler and returns the finished [`SocketType`].
+    /// Declares that this route expects a VEIL-encrypted request body, transitioning to
+    /// [`EncryptedBodyBuilder`].
     ///
-    /// The handler receives no arguments and must return
-    /// `impl Future<Output = Result<impl Reply, Rejection>>`. Use the [`reply!`] macro or the
-    /// standalone reply helpers to construct the return value.
+    /// On each incoming request the raw body bytes are decrypted using the provided
+    /// [`SerializationKey`] before the handler is called.  If the key does not match or
+    /// the body is corrupt, the route responds with `403 Forbidden` and the handler is
+    /// never invoked — meaning the `T` your handler receives is always a legitimate,
+    /// trusted, fully-decrypted value.
+    ///
+    /// Use `SerializationKey::Default` when both client and server share the built-in key,
+    /// or `SerializationKey::Value("your-key")` for a custom shared secret.
+    /// For plain-JSON routes (no encryption) use [`.json::<T>()`](ServerMechanism::json)
+    /// instead.
+    ///
+    /// `T` must implement `bincode::Decode<()>`.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use bincode::{Encode, Decode};
+    /// # #[derive(Encode, Decode)] struct Payload { value: i32 }
+    ///
+    /// let route = ServerMechanism::post("/submit")
+    ///     .encryption::<Payload>(SerializationKey::Default)
+    ///     .onconnect(|body| async move {
+    ///         // `body` is already decrypted and deserialised — use it directly.
+    ///         reply!(json => body.value)
+    ///     });
+    /// ```
+    pub fn encryption<T>(self, key: SerializationKey) -> EncryptedBodyBuilder<T> {
+        log::trace!("Attaching encrypted body to {:?} route at '{}'", self.method, self.path);
+        EncryptedBodyBuilder { base: self, key, _phantom: std::marker::PhantomData }
+    }
+
+    /// Declares that this route expects VEIL-encrypted URL query parameters, transitioning
+    /// to [`EncryptedQueryBuilder`].
+    ///
+    /// The client must send a single `?data=<base64url>` query parameter whose value is
+    /// the URL-safe base64 encoding of the VEIL-encrypted struct bytes.  On each request
+    /// the server base64-decodes then decrypts the payload using the provided
+    /// [`SerializationKey`].  If the `data` parameter is missing, the encoding is invalid,
+    /// the key does not match, or the bytes are corrupt, the route responds with
+    /// `403 Forbidden` and the handler is never invoked — meaning the `T` your handler
+    /// receives is always a legitimate, trusted, fully-decrypted value.
+    ///
+    /// Use `SerializationKey::Default` or `SerializationKey::Value("your-key")`.  For
+    /// plain query-string routes (no encryption) use
+    /// [`.query::<T>()`](ServerMechanism::query) instead.
+    ///
+    /// `T` must implement `bincode::Decode<()>`.
+    pub fn encrypted_query<T>(self, key: SerializationKey) -> EncryptedQueryBuilder<T> {
+        log::trace!("Attaching encrypted query to {:?} route at '{}'", self.method, self.path);
+        EncryptedQueryBuilder { base: self, key, _phantom: std::marker::PhantomData }
+    }
+
+    /// Finalises this route with an async handler that receives no arguments.
+    ///
+    /// Neither a request body nor query parameters are read.  The handler runs on every
+    /// matching request and must return `Result<impl Reply, Rejection>`.  Use the
+    /// [`reply!`] macro or the standalone reply helpers ([`reply_with_json`],
+    /// [`reply_with_status`], etc.) to construct a response.
+    ///
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     ///
     /// # Example
     /// ```rust,no_run
@@ -224,9 +355,14 @@ impl ServerMechanism {
             .boxed()
     }
 
-    /// Attaches a **synchronous** handler and returns the finished [`SocketType`].
+    /// Finalises this route with a **synchronous** handler that receives no arguments.
     ///
-    /// The handler receives no arguments and must return `Result<impl Reply, Rejection>`.
+    /// Behaviour and contract are identical to the async variant — neither a body nor
+    /// query parameters are read — but the closure may block.  Each request is dispatched
+    /// to the blocking thread pool, so the handler must complete quickly to avoid starving
+    /// other requests.
+    ///
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     ///
     /// # Safety
     ///
@@ -276,9 +412,15 @@ pub struct JsonSocketBuilder<T> {
 
 impl<T: DeserializeOwned + Send + 'static> JsonSocketBuilder<T> {
 
-    /// Attaches an async handler that receives the deserialised JSON body as `T`.
+    /// Finalises this route with an async handler that receives the deserialised JSON body.
     ///
-    /// `handler` must be `Fn(T) -> impl Future<Output = Result<impl Reply, Rejection>>`.
+    /// Before the handler is called, the incoming request body is parsed as
+    /// `Content-Type: application/json` and deserialised into `T`.  The handler receives
+    /// a ready-to-use `T` — no manual parsing is needed.  If the body is absent or cannot
+    /// be decoded the request is rejected before the handler is ever invoked.
+    ///
+    /// The handler must return `Result<impl Reply, Rejection>`.
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     pub fn onconnect<F, Fut, Re>(self, handler: F) -> SocketType
     where 
         F: Fn(T) -> Fut + Clone + Send + Sync + 'static,
@@ -295,9 +437,14 @@ impl<T: DeserializeOwned + Send + 'static> JsonSocketBuilder<T> {
             .boxed()
     }
 
-    /// Attaches a **synchronous** handler that receives the deserialised JSON body as `T`.
+    /// Finalises this route with a **synchronous** handler that receives the deserialised
+    /// JSON body.
     ///
-    /// `handler` must be `Fn(T) -> Result<impl Reply, Rejection>`.
+    /// The body is decoded into `T` before the handler is dispatched, identical to the
+    /// async variant.  The closure may block but must complete quickly to avoid exhausting
+    /// the blocking thread pool.
+    ///
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     ///
     /// # Safety
     ///
@@ -335,6 +482,10 @@ impl<T: DeserializeOwned + Send + 'static> JsonSocketBuilder<T> {
 
     /// Attaches shared state `S`, transitioning to [`StatefulJsonSocketBuilder`].
     ///
+    /// Alternative ordering to `.state(s).json::<T>()` — both produce the same route.
+    /// A fresh clone of `S` is injected alongside the JSON-decoded `T` on every request.
+    /// The handler will receive `(state: S, body: T)`.
+    ///
     /// `S` must be `Clone + Send + Sync + 'static`.
     pub fn state<S: Clone + Send + Sync + 'static>(self, state: S) -> StatefulJsonSocketBuilder<T, S> {
         StatefulJsonSocketBuilder { base: self.base, state, _phantom: std::marker::PhantomData }
@@ -354,9 +505,16 @@ pub struct QuerySocketBuilder<T> {
 }
 
 impl<T: DeserializeOwned + Send + 'static> QuerySocketBuilder<T> {
-    /// Attaches an async handler that receives the deserialised query parameters as `T`.
+    /// Finalises this route with an async handler that receives the deserialised query
+    /// parameters.
     ///
-    /// `handler` must be `Fn(T) -> impl Future<Output = Result<impl Reply, Rejection>>`.
+    /// Before the handler is called, the URL query string (`?field=value&...`) is parsed
+    /// and deserialised into `T`.  The handler receives a ready-to-use `T` — no manual
+    /// parsing is needed.  A missing or malformed query string is rejected before the
+    /// handler is ever invoked.
+    ///
+    /// The handler must return `Result<impl Reply, Rejection>`.
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     pub fn onconnect<F, Fut, Re>(self, handler: F) -> SocketType
     where
         F: Fn(T) -> Fut + Clone + Send + Sync + 'static,
@@ -373,9 +531,13 @@ impl<T: DeserializeOwned + Send + 'static> QuerySocketBuilder<T> {
             .boxed()
     }
 
-    /// Attaches a **synchronous** handler that receives the deserialised query parameters as `T`.
+    /// Finalises this route with a **synchronous** handler that receives the deserialised
+    /// query parameters.
     ///
-    /// `handler` must be `Fn(T) -> Result<impl Reply, Rejection>`.
+    /// The query string is decoded into `T` before the handler is dispatched, identical to
+    /// the async variant.  The closure may block but must complete quickly.
+    ///
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     ///
     /// # Safety
     ///
@@ -413,6 +575,10 @@ impl<T: DeserializeOwned + Send + 'static> QuerySocketBuilder<T> {
 
     /// Attaches shared state `S`, transitioning to [`StatefulQuerySocketBuilder`].
     ///
+    /// Alternative ordering to `.state(s).query::<T>()` — both produce the same route.
+    /// A fresh clone of `S` is injected alongside the query-decoded `T` on every request.
+    /// The handler will receive `(state: S, query: T)`.
+    ///
     /// `S` must be `Clone + Send + Sync + 'static`.
     pub fn state<S: Clone + Send + Sync + 'static>(self, state: S) -> StatefulQuerySocketBuilder<T, S> {
         StatefulQuerySocketBuilder { base: self.base, state, _phantom: std::marker::PhantomData }
@@ -434,9 +600,67 @@ pub struct StatefulSocketBuilder<S> {
 
 
 impl<S: Clone + Send + Sync + 'static> StatefulSocketBuilder<S> {
-    /// Attaches an async handler that receives the shared state as its only argument.
+    /// Adds a JSON body expectation, transitioning to [`StatefulJsonSocketBuilder`].
     ///
-    /// `handler` must be `Fn(S) -> impl Future<Output = Result<impl Reply, Rejection>>`.
+    /// Alternative ordering to `.json::<T>().state(s)` — both produce the same route.
+    /// On each request the incoming JSON body is deserialised into `T` and a fresh clone
+    /// of `S` is prepared; both are handed to the handler together as `(state: S, body: T)`.
+    ///
+    /// Allows `.state(s).json::<T>()` as an alternative ordering to `.json::<T>().state(s)`.
+    pub fn json<T: DeserializeOwned + Send>(self) -> StatefulJsonSocketBuilder<T, S> {
+        log::trace!("Attaching JSON body expectation (after state) to {:?} route at '{}'", self.base.method, self.base.path);
+        StatefulJsonSocketBuilder { base: self.base, state: self.state, _phantom: std::marker::PhantomData }
+    }
+
+    /// Adds a query parameter expectation, transitioning to [`StatefulQuerySocketBuilder`].
+    ///
+    /// Alternative ordering to `.query::<T>().state(s)` — both produce the same route.
+    /// On each request the URL query string is deserialised into `T` and a fresh clone
+    /// of `S` is prepared; both are handed to the handler together as `(state: S, query: T)`.
+    ///
+    /// Allows `.state(s).query::<T>()` as an alternative ordering to `.query::<T>().state(s)`.
+    pub fn query<T: DeserializeOwned + Send>(self) -> StatefulQuerySocketBuilder<T, S> {
+        log::trace!("Attaching query param expectation (after state) to {:?} route at '{}'", self.base.method, self.base.path);
+        StatefulQuerySocketBuilder { base: self.base, state: self.state, _phantom: std::marker::PhantomData }
+    }
+
+    /// Adds an encrypted body expectation, transitioning to [`StatefulEncryptedBodyBuilder`].
+    ///
+    /// Alternative ordering to `.encryption::<T>(key).state(s)` — both produce the same
+    /// route.  On each request the raw body bytes are VEIL-decrypted using `key` before
+    /// the handler runs; a wrong key or corrupt body returns `403 Forbidden` without
+    /// invoking the handler.  The handler will receive `(state: S, body: T)` where `T` is
+    /// always a trusted, fully-decrypted value.
+    ///
+    /// Allows `.state(s).encryption::<T>(key)` as an alternative ordering to
+    /// `.encryption::<T>(key).state(s)`.
+    pub fn encryption<T>(self, key: SerializationKey) -> StatefulEncryptedBodyBuilder<T, S> {
+        log::trace!("Attaching encrypted body (after state) to {:?} route at '{}'", self.base.method, self.base.path);
+        StatefulEncryptedBodyBuilder { base: self.base, key, state: self.state, _phantom: std::marker::PhantomData }
+    }
+
+    /// Adds an encrypted query expectation, transitioning to [`StatefulEncryptedQueryBuilder`].
+    ///
+    /// Alternative ordering to `.encrypted_query::<T>(key).state(s)` — both produce the
+    /// same route.  On each request the `?data=<base64url>` query parameter is
+    /// base64-decoded then VEIL-decrypted using `key`; a missing, malformed, or
+    /// undecryptable payload returns `403 Forbidden` without invoking the handler.  The
+    /// handler will receive `(state: S, query: T)` where `T` is always a trusted,
+    /// fully-decrypted value.
+    ///
+    /// Allows `.state(s).encrypted_query::<T>(key)` as an alternative ordering to
+    /// `.encrypted_query::<T>(key).state(s)`.
+    pub fn encrypted_query<T>(self, key: SerializationKey) -> StatefulEncryptedQueryBuilder<T, S> {
+        log::trace!("Attaching encrypted query (after state) to {:?} route at '{}'", self.base.method, self.base.path);
+        StatefulEncryptedQueryBuilder { base: self.base, key, state: self.state, _phantom: std::marker::PhantomData }
+    }
+
+    /// Finalises this route with an async handler that receives only the shared state.
+    ///
+    /// On each request a fresh clone of `S` is injected into the handler.  No request body
+    /// or query parameters are read.  The handler must return `Result<impl Reply, Rejection>`.
+    ///
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     pub fn onconnect<F, Fut, Re>(self, handler: F) -> SocketType
     where
         F: Fn(S) -> Fut + Clone + Send + Sync + 'static,
@@ -455,9 +679,14 @@ impl<S: Clone + Send + Sync + 'static> StatefulSocketBuilder<S> {
             .boxed()
     }
 
-    /// Attaches a **synchronous** handler that receives the shared state as its only argument.
+    /// Finalises this route with a **synchronous** handler that receives only the shared
+    /// state.
     ///
-    /// `handler` must be `Fn(S) -> Result<impl Reply, Rejection>`.
+    /// On each request a fresh clone of `S` is passed to the handler.  If `S` wraps a mutex
+    /// or lock, contention across concurrent requests can stall the thread pool — ensure the
+    /// lock is held only briefly.  The closure may block but must complete quickly.
+    ///
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     ///
     /// # Safety
     ///
@@ -516,9 +745,14 @@ pub struct StatefulJsonSocketBuilder<T, S> {
 impl<T: DeserializeOwned + Send + 'static, S: Clone + Send + Sync + 'static>
     StatefulJsonSocketBuilder<T, S>
 {
-    /// Attaches an async handler that receives `(state: S, body: T)`.
+    /// Finalises this route with an async handler that receives `(state: S, body: T)`.
     ///
-    /// `handler` must be `Fn(S, T) -> impl Future<Output = Result<impl Reply, Rejection>>`.
+    /// On each request the incoming JSON body is deserialised into `T` and a fresh clone
+    /// of `S` is prepared — both are handed to the handler together.  The handler is only
+    /// called when the body can be decoded; a missing or malformed body is rejected first.
+    ///
+    /// The handler must return `Result<impl Reply, Rejection>`.
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     pub fn onconnect<F, Fut, Re>(self, handler: F) -> SocketType
     where
         F: Fn(S, T) -> Fut + Clone + Send + Sync + 'static,
@@ -538,9 +772,14 @@ impl<T: DeserializeOwned + Send + 'static, S: Clone + Send + Sync + 'static>
             .boxed()
     }
 
-    /// Attaches a **synchronous** handler that receives `(state: S, body: T)`.
+    /// Finalises this route with a **synchronous** handler that receives
+    /// `(state: S, body: T)`.
     ///
-    /// `handler` must be `Fn(S, T) -> Result<impl Reply, Rejection>`.
+    /// The body is decoded into `T` and a clone of `S` is prepared before the blocking
+    /// handler is dispatched.  If `S` wraps a lock, keep it held only briefly.  See
+    /// [`ServerMechanism::onconnect_sync`] for the full thread-pool safety notes.
+    ///
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     ///
     /// # Safety
     ///
@@ -599,9 +838,14 @@ pub struct StatefulQuerySocketBuilder<T, S> {
 impl<T: DeserializeOwned + Send + 'static, S: Clone + Send + Sync + 'static>
     StatefulQuerySocketBuilder<T, S>
 {
-    /// Attaches an async handler that receives `(state: S, query: T)`.
+    /// Finalises this route with an async handler that receives `(state: S, query: T)`.
     ///
-    /// `handler` must be `Fn(S, T) -> impl Future<Output = Result<impl Reply, Rejection>>`.
+    /// On each request the URL query string is deserialised into `T` and a fresh clone of
+    /// `S` is prepared — both are handed to the handler together.  A missing or malformed
+    /// query string is rejected before the handler is ever invoked.
+    ///
+    /// The handler must return `Result<impl Reply, Rejection>`.
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     pub fn onconnect<F, Fut, Re>(self, handler: F) -> SocketType
     where
         F: Fn(S, T) -> Fut + Clone + Send + Sync + 'static,
@@ -621,9 +865,14 @@ impl<T: DeserializeOwned + Send + 'static, S: Clone + Send + Sync + 'static>
             .boxed()
     }
 
-    /// Attaches a **synchronous** handler that receives `(state: S, query: T)`.
+    /// Finalises this route with a **synchronous** handler that receives
+    /// `(state: S, query: T)`.
     ///
-    /// `handler` must be `Fn(S, T) -> Result<impl Reply, Rejection>`.
+    /// The query string is decoded into `T` and a clone of `S` is prepared before the
+    /// blocking handler is dispatched.  If `S` wraps a lock, keep it held only briefly.
+    /// See [`ServerMechanism::onconnect_sync`] for the full thread-pool safety notes.
+    ///
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
     ///
     /// # Safety
     ///
@@ -666,6 +915,351 @@ impl<T: DeserializeOwned + Send + 'static, S: Clone + Send + Sync + 'static>
             .boxed()
     }
 }
+
+// ─── EncryptedBodyBuilder ────────────────────────────────────────────────────
+
+/// Route builder that expects a VEIL-encrypted request body of type `T`.
+///
+/// Obtained from [`ServerMechanism::encryption`].  On each matching request the raw
+/// body bytes are decrypted using the [`SerializationKey`] supplied there.  If
+/// decryption fails for any reason (wrong key, mismatched secret, corrupted payload)
+/// the route immediately returns `403 Forbidden` — the handler is never invoked.
+///
+/// Optionally attach shared state via [`state`](EncryptedBodyBuilder::state) before
+/// finalising with [`onconnect`](EncryptedBodyBuilder::onconnect) /
+/// [`onconnect_sync`](EncryptedBodyBuilder::onconnect_sync).
+pub struct EncryptedBodyBuilder<T> {
+    base: ServerMechanism,
+    key: SerializationKey,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> EncryptedBodyBuilder<T>
+where
+    T: bincode::Decode<()> + Send + 'static,
+{
+    /// Finalises this route with an async handler that receives the decrypted body as `T`.
+    ///
+    /// On each request the raw body bytes are VEIL-decrypted using the [`SerializationKey`]
+    /// configured on this builder.  The handler is only invoked when decryption succeeds —
+    /// a wrong key, mismatched secret, or corrupted body causes the route to return
+    /// `403 Forbidden` without ever reaching the handler.  The `T` the closure receives is
+    /// therefore always a trusted, fully-decrypted value ready to use.
+    ///
+    /// The handler must return `Result<impl Reply, Rejection>`.
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
+    pub fn onconnect<F, Fut, Re>(self, handler: F) -> SocketType
+    where
+        F: Fn(T) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = Result<Re, Rejection>> + Send,
+        Re: Reply + Send,
+    {
+        log::debug!("Finalising async {:?} route at '{}' (encrypted body)", self.base.method, self.base.path);
+        let m = self.base.method.filter();
+        let p = path_filter(&self.base.path);
+        let key = self.key;
+        m.and(p)
+            .and(warp::body::bytes())
+            .and_then(move |raw: bytes::Bytes| {
+                let key = key.clone();
+                let handler = handler.clone();
+                async move {
+                    let value: T = decode_body(&raw, &key)?;
+                    handler(value).await.map(|r| r.into_response())
+                }
+            })
+            .boxed()
+    }
+
+    /// Finalises this route with a **synchronous** handler that receives the decrypted
+    /// body as `T`.
+    ///
+    /// Decryption happens before the handler is dispatched to the thread pool: if the key
+    /// is wrong or the body is corrupt the request is rejected with `403 Forbidden` and
+    /// the thread pool is not touched at all.  The `T` handed to the closure is always a
+    /// trusted, fully-decrypted value.  The closure may block but must complete quickly.
+    ///
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
+    ///
+    /// # Safety
+    /// See [`ServerMechanism::onconnect_sync`] for the thread-pool safety notes.
+    pub unsafe fn onconnect_sync<F, Re>(self, handler: F) -> SocketType
+    where
+        F: Fn(T) -> Result<Re, Rejection> + Clone + Send + Sync + 'static,
+        Re: Reply + Send + 'static,
+    {
+        log::warn!("Registering sync handler on {:?} '{}' (encrypted body) — ensure rate-limiting is applied externally", self.base.method, self.base.path);
+        let m = self.base.method.filter();
+        let p = path_filter(&self.base.path);
+        let key = self.key;
+        m.and(p)
+            .and(warp::body::bytes())
+            .and_then(move |raw: bytes::Bytes| {
+                let key = key.clone();
+                let handler = handler.clone();
+                async move {
+                    let value: T = decode_body(&raw, &key)?;
+                    tokio::task::spawn_blocking(move || handler(value))
+                        .await
+                        .unwrap_or_else(|_| {
+                            log::warn!("Sync encrypted handler panicked; converting to Rejection");
+                            Err(warp::reject())
+                        })
+                        .map(|r| r.into_response())
+                }
+            })
+            .boxed()
+    }
+
+    /// Attaches shared state `S`, transitioning to [`StatefulEncryptedBodyBuilder`].
+    ///
+    /// A fresh clone of `S` is injected alongside the decrypted `T` on every request.
+    /// The handler will receive `(state: S, body: T)`.
+    ///
+    /// `S` must be `Clone + Send + Sync + 'static`.
+    pub fn state<S: Clone + Send + Sync + 'static>(self, state: S) -> StatefulEncryptedBodyBuilder<T, S> {
+        StatefulEncryptedBodyBuilder { base: self.base, key: self.key, state, _phantom: std::marker::PhantomData }
+    }
+}
+
+// ─── EncryptedQueryBuilder ────────────────────────────────────────────────────
+
+/// Route builder that expects VEIL-encrypted URL query parameters of type `T`.
+///
+/// Obtained from [`ServerMechanism::encrypted_query`].  The client must send a single
+/// `?data=<base64url>` query parameter whose value is the URL-safe base64 encoding of
+/// the VEIL-encrypted struct bytes.  On each matching request the server base64-decodes
+/// then decrypts the value using the configured [`SerializationKey`].  If any step fails
+/// (missing `data` parameter, invalid base64, wrong key, corrupt bytes) the route
+/// returns `403 Forbidden` — the handler is never invoked.
+///
+/// Optionally attach shared state via [`state`](EncryptedQueryBuilder::state) before
+/// finalising with [`onconnect`](EncryptedQueryBuilder::onconnect).
+pub struct EncryptedQueryBuilder<T> {
+    base: ServerMechanism,
+    key: SerializationKey,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> EncryptedQueryBuilder<T>
+where
+    T: bincode::Decode<()> + Send + 'static,
+{
+    /// Finalises this route with an async handler that receives the decrypted query
+    /// parameters as `T`.
+    ///
+    /// On each request the `?data=<base64url>` query parameter is base64-decoded then
+    /// VEIL-decrypted using the [`SerializationKey`] on this builder.  The handler is only
+    /// invoked when every step succeeds — a missing `data` parameter, invalid base64,
+    /// wrong key, or corrupt payload causes the route to return `403 Forbidden` without
+    /// ever reaching the handler.  The `T` the closure receives is therefore always a
+    /// trusted, fully-decrypted value ready to use.
+    ///
+    /// The handler must return `Result<impl Reply, Rejection>`.
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
+    pub fn onconnect<F, Fut, Re>(self, handler: F) -> SocketType
+    where
+        F: Fn(T) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = Result<Re, Rejection>> + Send,
+        Re: Reply + Send,
+    {
+        log::debug!("Finalising async {:?} route at '{}' (encrypted query)", self.base.method, self.base.path);
+        let m = self.base.method.filter();
+        let p = path_filter(&self.base.path);
+        let key = self.key;
+        m.and(p)
+            .and(warp::filters::query::raw())
+            .and_then(move |raw_query: String| {
+                let key = key.clone();
+                let handler = handler.clone();
+                async move {
+                    let value: T = decode_query(&raw_query, &key)?;
+                    handler(value).await.map(|r| r.into_response())
+                }
+            })
+            .boxed()
+    }
+
+    /// Attaches shared state `S`, transitioning to [`StatefulEncryptedQueryBuilder`].
+    ///
+    /// A fresh clone of `S` is injected alongside the decrypted `T` on every request.
+    /// The handler will receive `(state: S, query: T)`.
+    ///
+    /// `S` must be `Clone + Send + Sync + 'static`.
+    pub fn state<S: Clone + Send + Sync + 'static>(self, state: S) -> StatefulEncryptedQueryBuilder<T, S> {
+        StatefulEncryptedQueryBuilder { base: self.base, key: self.key, state, _phantom: std::marker::PhantomData }
+    }
+}
+
+// ─── StatefulEncryptedBodyBuilder ────────────────────────────────────────────
+
+/// Route builder carrying shared state `S` and a VEIL-encrypted request body of type `T`.
+///
+/// Obtained from [`EncryptedBodyBuilder::state`] or [`StatefulSocketBuilder::encryption`].
+/// On each matching request the body is VEIL-decrypted and a fresh clone of `S` is
+/// prepared before the handler is called.  A wrong key or corrupt body returns
+/// `403 Forbidden` without ever invoking the handler.
+///
+/// Finalise with [`onconnect`](StatefulEncryptedBodyBuilder::onconnect).
+pub struct StatefulEncryptedBodyBuilder<T, S> {
+    base: ServerMechanism,
+    key: SerializationKey,
+    state: S,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T, S> StatefulEncryptedBodyBuilder<T, S>
+where
+    T: bincode::Decode<()> + Send + 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    /// Finalises this route with an async handler that receives `(state: S, body: T)`.
+    ///
+    /// On each request the raw body bytes are VEIL-decrypted using the configured
+    /// [`SerializationKey`] and a fresh clone of `S` is prepared — both are handed to the
+    /// handler together.  If decryption fails (wrong key or corrupt body) the route returns
+    /// `403 Forbidden` and the handler is never invoked.  The `T` the closure receives is
+    /// always a trusted, fully-decrypted value ready to use.
+    ///
+    /// The handler must return `Result<impl Reply, Rejection>`.
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
+    pub fn onconnect<F, Fut, Re>(self, handler: F) -> SocketType
+    where
+        F: Fn(S, T) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = Result<Re, Rejection>> + Send,
+        Re: Reply + Send,
+    {
+        log::debug!("Finalising async {:?} route at '{}' (state + encrypted body)", self.base.method, self.base.path);
+        let m = self.base.method.filter();
+        let p = path_filter(&self.base.path);
+        let key = self.key;
+        let state = self.state;
+        let state_filter = warp::any().map(move || state.clone());
+        m.and(p)
+            .and(state_filter)
+            .and(warp::body::bytes())
+            .and_then(move |s: S, raw: bytes::Bytes| {
+                let key = key.clone();
+                let handler = handler.clone();
+                async move {
+                    let value: T = decode_body(&raw, &key)?;
+                    handler(s, value).await.map(|r| r.into_response())
+                }
+            })
+            .boxed()
+    }
+}
+
+// ─── StatefulEncryptedQueryBuilder ───────────────────────────────────────────
+
+/// Route builder carrying shared state `S` and VEIL-encrypted query parameters of
+/// type `T`.
+///
+/// Obtained from [`EncryptedQueryBuilder::state`] or
+/// [`StatefulSocketBuilder::encrypted_query`].  On each matching request the
+/// `?data=<base64url>` parameter is base64-decoded then VEIL-decrypted and a fresh
+/// clone of `S` is prepared before the handler is called.  Any decode or decryption
+/// failure returns `403 Forbidden` without ever invoking the handler.
+///
+/// Finalise with [`onconnect`](StatefulEncryptedQueryBuilder::onconnect).
+pub struct StatefulEncryptedQueryBuilder<T, S> {
+    base: ServerMechanism,
+    key: SerializationKey,
+    state: S,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T, S> StatefulEncryptedQueryBuilder<T, S>
+where
+    T: bincode::Decode<()> + Send + 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    /// Finalises this route with an async handler that receives `(state: S, query: T)`.
+    ///
+    /// On each request the `?data=<base64url>` query parameter is base64-decoded then
+    /// VEIL-decrypted using the configured [`SerializationKey`] and a fresh clone of `S`
+    /// is prepared — both are handed to the handler together.  If any step fails (missing
+    /// parameter, bad encoding, wrong key, or corrupt data) the route returns
+    /// `403 Forbidden` and the handler is never invoked.  The `T` the closure receives is
+    /// always a trusted, fully-decrypted value ready to use.
+    ///
+    /// The handler must return `Result<impl Reply, Rejection>`.
+    /// Returns a [`SocketType`] ready to be passed to [`Server::mechanism`].
+    pub fn onconnect<F, Fut, Re>(self, handler: F) -> SocketType
+    where
+        F: Fn(S, T) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = Result<Re, Rejection>> + Send,
+        Re: Reply + Send,
+    {
+        log::debug!("Finalising async {:?} route at '{}' (state + encrypted query)", self.base.method, self.base.path);
+        let m = self.base.method.filter();
+        let p = path_filter(&self.base.path);
+        let key = self.key;
+        let state = self.state;
+        let state_filter = warp::any().map(move || state.clone());
+        m.and(p)
+            .and(state_filter)
+            .and(warp::filters::query::raw())
+            .and_then(move |s: S, raw_query: String| {
+                let key = key.clone();
+                let handler = handler.clone();
+                async move {
+                    let value: T = decode_query(&raw_query, &key)?;
+                    handler(s, value).await.map(|r| r.into_response())
+                }
+            })
+            .boxed()
+    }
+}
+
+// ─── Internal decode helpers ─────────────────────────────────────────────────
+
+/// Decode a VEIL-sealed request body into `T`, returning `403 Forbidden` on any failure.
+fn decode_body<T: bincode::Decode<()>>(raw: &bytes::Bytes, key: &SerializationKey) -> Result<T, Rejection> {
+    crate::serialization::open(raw, key.veil_key()).map_err(|e| {
+        log::debug!("VEIL open failed (key mismatch or corrupt body): {e}");
+        forbidden()
+    })
+}
+
+/// Decode a VEIL-sealed query parameter (`?data=<base64url>`) into `T`,
+/// returning `403 Forbidden` on any failure.
+fn decode_query<T: bincode::Decode<()>>(raw_query: &str, key: &SerializationKey) -> Result<T, Rejection> {
+    // Extract the `data` parameter value from the raw query string.
+    let data_value = serde_urlencoded::from_str::<std::collections::HashMap<String, String>>(raw_query)
+        .ok()
+        .and_then(|mut m| m.remove("data"));
+
+    let b64 = data_value.ok_or_else(|| {
+        log::debug!("Encrypted query missing `data` parameter");
+        forbidden()
+    })?;
+
+    let bytes = base64::engine::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        b64.trim_end_matches('='),
+    )
+    .map_err(|e| {
+        log::debug!("base64url decode failed: {e}");
+        forbidden()
+    })?;
+
+    crate::serialization::open(&bytes, key.veil_key()).map_err(|e| {
+        log::debug!("VEIL open (query) failed: {e}");
+        forbidden()
+    })
+}
+
+/// Builds a `403 Forbidden` rejection response.
+fn forbidden() -> Rejection {
+    // Warp doesn't expose a built-in 403 rejection, so we use a custom one.
+    warp::reject::custom(ForbiddenError)
+}
+
+#[derive(Debug)]
+struct ForbiddenError;
+
+impl warp::reject::Reject for ForbiddenError {}
 
 /// A collection of common HTTP status codes used with the reply helpers.
 ///
@@ -809,6 +1403,91 @@ impl Server {
         log::info!("Server running on {}", addr);
         warp::serve(combined).run(addr).await;
     }
+
+    /// Binds to `addr`, serves all registered routes, and shuts down gracefully when
+    /// `shutdown` resolves.
+    ///
+    /// Equivalent to calling [`serve_from_listener`](Server::serve_from_listener) with an
+    /// address instead of a pre-bound listener.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use tokio::sync::oneshot;
+    ///
+    /// # async fn run() {
+    /// let (tx, rx) = oneshot::channel::<()>();
+    /// // ... build server and mount routes ...
+    /// // trigger shutdown later by calling tx.send(())
+    /// server.serve_with_graceful_shutdown(([127, 0, 0, 1], 8080), async move {
+    ///     rx.await.ok();
+    /// }).await;
+    /// # }
+    /// ```
+    pub async fn serve_with_graceful_shutdown(
+        self,
+        addr: impl Into<std::net::SocketAddr>,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let addr = addr.into();
+        log::info!("Server binding to {} (graceful shutdown enabled)", addr);
+        let mut iter = self.mechanisms.into_iter();
+        let first = iter.next().unwrap_or_else(|| {
+            log::error!("The server contains no mechanisms to follow through");
+            panic!("serve_with_graceful_shutdown called with no routes registered");
+        });
+        let combined = iter.fold(first.boxed(), |acc, next| acc.or(next).unify().boxed());
+        log::info!("Server running on {} (graceful shutdown enabled)", addr);
+        warp::serve(combined)
+            .bind(addr)
+            .await
+            .graceful(shutdown)
+            .run()
+            .await;
+    }
+
+    /// Serves all registered routes from an already-bound `listener`, shutting down gracefully
+    /// when `shutdown` resolves.
+    ///
+    /// Use this when port `0` is passed to `TcpListener::bind` and you need to know the actual
+    /// OS-assigned port before the server starts (e.g. to open a browser to the correct URL).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use tokio::net::TcpListener;
+    /// use tokio::sync::oneshot;
+    ///
+    /// # async fn run() -> std::io::Result<()> {
+    /// let listener = TcpListener::bind("127.0.0.1:0").await?;
+    /// let port = listener.local_addr()?.port();
+    /// println!("Will listen on port {port}");
+    ///
+    /// let (tx, rx) = oneshot::channel::<()>();
+    /// // ... build server and mount routes ...
+    /// server.serve_from_listener(listener, async move { rx.await.ok(); }).await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn serve_from_listener(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        log::info!("Server running on {} (graceful shutdown enabled)",
+            listener.local_addr().map(|a| a.to_string()).unwrap_or_else(|_| "?".into()));
+        let mut iter = self.mechanisms.into_iter();
+        let first = iter.next().unwrap_or_else(|| {
+            log::error!("The server contains no mechanisms to follow through");
+            panic!("serve_from_listener called with no routes registered");
+        });
+        let combined = iter.fold(first.boxed(), |acc, next| acc.or(next).unify().boxed());
+        warp::serve(combined)
+            .incoming(listener)
+            .graceful(shutdown)
+            .run()
+            .await;
+    }
 }
 
 /// Wraps `reply` with the given HTTP `status` code and returns it as a warp result.
@@ -830,15 +1509,49 @@ pub fn reply() -> Result<impl Reply, Rejection> {
 /// Serialises `json` as a JSON body and returns it as a `200 OK` warp reply result.
 ///
 /// `T` must implement `serde::Serialize`. Equivalent to `reply!(json => ...)`.
-pub fn reply_with_json<T: Serialize>(json: &T) -> Result<impl Reply, Rejection> {
+pub fn reply_with_json<T: Serialize>(json: &T) -> Result<impl Reply + use<T>, Rejection> {
     Ok::<_, Rejection>(warp::reply::json(json))
 }
 
 /// Serialises `json` as a JSON body, attaches the given HTTP `status`, and returns a warp result.
 ///
 /// `T` must implement `serde::Serialize`. Equivalent to `reply!(json => ..., status => ...)`.
-pub fn reply_with_status_and_json<T: Serialize>(status: Status, json: &T) -> Result<impl Reply, Rejection> {
+pub fn reply_with_status_and_json<T: Serialize>(status: Status, json: &T) -> Result<impl Reply + use<T>, Rejection> {
     Ok::<_, Rejection>(warp::reply::with_status(warp::reply::json(json), status.into()))
+}
+
+/// Seals `value` with `key` and returns it as an `application/octet-stream` response (`200 OK`).
+///
+/// `T` must implement `bincode::Encode`.
+/// Equivalent to `reply!(sealed => value, key => key)`.
+pub fn reply_sealed<T: bincode::Encode>(
+    value: &T,
+    key: SerializationKey,
+) -> Result<warp::reply::Response, Rejection> {
+    sealed_response(value, key, None)
+}
+
+/// Seals `value` with `key`, attaches the given HTTP `status`, and returns it as a warp result.
+///
+/// Equivalent to `reply!(sealed => value, key => key, status => Status::X)`.
+pub fn reply_sealed_with_status<T: bincode::Encode>(
+    value: &T,
+    key: SerializationKey,
+    status: Status,
+) -> Result<warp::reply::Response, Rejection> {
+    sealed_response(value, key, Some(status))
+}
+
+fn sealed_response<T: bincode::Encode>(
+    value: &T,
+    key: SerializationKey,
+    status: Option<Status>,
+) -> Result<warp::reply::Response, Rejection> {
+    use warp::http::StatusCode;
+    use warp::Reply;
+    let code: StatusCode = status.map(Into::into).unwrap_or(StatusCode::OK);
+    let sealed = crate::serialization::seal(value, key.veil_key()).map_err(|_| warp::reject())?;
+    Ok(warp::reply::with_status(sealed, code).into_response())
 }
 
 /// Convenience macro for constructing warp reply results inside route handlers.
@@ -849,6 +1562,8 @@ pub fn reply_with_status_and_json<T: Serialize>(status: Status, json: &T) -> Res
 /// | `reply!(message => expr, status => Status::X)` | [`reply_with_status`] | Plain reply with a status code. |
 /// | `reply!(json => expr)` | [`reply_with_json`] | JSON body with `200 OK`. |
 /// | `reply!(json => expr, status => Status::X)` | [`reply_with_status_and_json`] | JSON body with a status code. |
+/// | `reply!(sealed => expr, key => key)` | [`reply_sealed`] | VEIL-sealed (or JSON for `Plain`) body, `200 OK`. |
+/// | `reply!(sealed => expr, key => key, status => Status::X)` | [`reply_sealed_with_status`] | VEIL-sealed (or JSON for `Plain`) body with status. |
 ///
 /// # Example
 /// ```rust,no_run
@@ -896,4 +1611,13 @@ macro_rules! reply {
     (json => $json: expr, status => $status: expr) => {{
         $crate::socket::server::reply_with_status_and_json($status, &$json)
     }};
+
+    (sealed => $val: expr, key => $key: expr) => {{
+        $crate::socket::server::reply_sealed(&$val, $key)
+    }};
+
+    (sealed => $val: expr, key => $key: expr, status => $status: expr) => {{
+        $crate::socket::server::reply_sealed_with_status(&$val, $key, $status)
+    }};
 }
+

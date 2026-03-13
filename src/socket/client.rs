@@ -1,6 +1,70 @@
 
+//! Typed, fluent HTTP client.
+//!
+//! This module provides a builder-oriented API for issuing HTTP requests
+//! against a configurable [`Target`] — a `localhost` port or an arbitrary
+//! remote base URL — and deserialising the response body into a concrete Rust
+//! type via [`serde`].
+//!
+//! The entry point is [`Client`]. Call any method constructor
+//! ([`get`](Client::get), [`post`](Client::post), etc.) to obtain a
+//! [`RequestBuilder`]. Optionally attach a JSON body via
+//! [`json`](RequestBuilder::json) or URL query parameters via
+//! [`query`](RequestBuilder::query), then finalise with
+//! [`send`](RequestBuilder::send) (async) or
+//! [`send_sync`](RequestBuilder::send_sync) (blocking).
+//! All seven standard HTTP methods are supported.
+//!
+//! # Builder chains at a glance
+//!
+//! | Chain | Sends |
+//! |---|---|
+//! | `client.method(endpoint).send().await` | plain request |
+//! | `.json(value).send().await` | `Content-Type: application/json` body |
+//! | `.query(params).send().await` | serialised query string |
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use toolkit_zero::socket::client::{Client, Target};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Deserialize, Serialize)] struct Item { id: u32, name: String }
+//! #[derive(Serialize)] struct NewItem { name: String }
+//! #[derive(Serialize)] struct Filter { page: u32 }
+//!
+//! # async fn run() -> Result<(), reqwest::Error> {
+//! let client = Client::new(Target::Localhost(8080));
+//!
+//! // Plain async GET
+//! let items: Vec<Item> = client.get("/items").send().await?;
+//!
+//! // POST with a JSON body
+//! let created: Item = client
+//!     .post("/items")
+//!     .json(NewItem { name: "widget".into() })
+//!     .send()
+//!     .await?;
+//!
+//! // GET with query parameters
+//! let page: Vec<Item> = client
+//!     .get("/items")
+//!     .query(Filter { page: 2 })
+//!     .send()
+//!     .await?;
+//!
+//! // Synchronous DELETE
+//! let _: Item = client.delete("/items/1").send_sync()?;
+//! # Ok(())
+//! # }
+//! ```
+
 use reqwest::{Client as AsyncClient, blocking::Client as BlockingClient};
 use serde::{Serialize, de::DeserializeOwned};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use crate::socket::SerializationKey;
+use crate::serialization::SerializationError;
 
 fn build_url(base: &str, endpoint: &str) -> String {
     let ep = endpoint.trim_start_matches('/');
@@ -59,65 +123,114 @@ pub enum Target {
 
 /// HTTP client for making typed requests against a [`Target`] server.
 ///
-/// Use the method constructors ([`get`](Client::get), [`post`](Client::post), etc.) to start a
-/// fluent builder chain. Optionally attach a JSON body via
-/// [`json`](RequestBuilder::json) or query parameters via [`query`](RequestBuilder::query),
-/// then finalise with [`send`](RequestBuilder::send) (async) or
-/// [`send_sync`](RequestBuilder::send_sync) (sync) to execute the request and deserialise the
-/// response into a concrete type.
+/// A `Client` is created in one of three modes depending on which send variants you need:
 ///
-/// The full URL is constructed automatically from the configured [`Target`] and the endpoint
-/// passed to the method constructor — no manual URL assembly required.
+/// | Constructor | `send()` (async) | `send_sync()` (blocking) | Safe in async context |
+/// |---|---|---|---|
+/// | [`Client::new_async`] | ✓ | ✗ | ✓ |
+/// | [`Client::new_sync`] | ✗ | ✓ | ✓ |
+/// | [`Client::new`] | ✓ | ✓ | ✗ — panics if called inside a tokio runtime |
+///
+/// `reqwest::blocking::Client` internally creates its own single-threaded tokio runtime. If
+/// you call `Client::new()` (or `Client::new_sync()`) from within an existing async context
+/// (e.g. inside `#[tokio::main]`) it will panic. Use `Client::new_async()` when your program
+/// is async-first and only call `Client::new_sync()` / `Client::new()` before entering any
+/// async runtime.
 ///
 /// # Example
 /// ```rust,no_run
 /// # use serde::{Deserialize, Serialize};
 /// # #[derive(Deserialize)] struct Item { id: u32, name: String }
 /// # #[derive(Serialize)] struct NewItem { name: String }
-/// # #[derive(Serialize)] struct SearchParams { q: String }
 /// # async fn example() -> Result<(), reqwest::Error> {
-/// let client = Client::new(Target::Localhost(8080));
+/// // Async-only client — safe inside #[tokio::main]
+/// let client = Client::new_async(Target::Localhost(8080));
 ///
-/// // Async GET — response deserialised into Vec<Item>
 /// let items: Vec<Item> = client.get("/items").send().await?;
-///
-/// // Async POST with a JSON body
-/// let created: Item = client
-///     .post("/items")
-///     .json(NewItem { name: "widget".to_string() })
-///     .send()
-///     .await?;
-///
-/// // Async GET with query parameters
-/// let results: Vec<Item> = client
-///     .get("/search")
-///     .query(SearchParams { q: "rust".to_string() })
-///     .send()
-///     .await?;
-///
-/// // Sync DELETE
-/// let _: Item = client.delete("/items/1").send_sync()?;
-///
-/// // All seven methods work identically: get, post, put, delete, patch, head, options
+/// let created: Item = client.post("/items").json(NewItem { name: "w".into() }).send().await?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone)]
 pub struct Client {
     target: Target,
-    async_client: AsyncClient,
-    sync_client: BlockingClient,
+    async_client: Option<AsyncClient>,
+    sync_client: Option<BlockingClient>,
 }
 
 impl Client {
-    /// Creates a new `Client` pointed at `target`.
+    /// Creates an **async-only** client. Safe to call from any context, including inside
+    /// `#[tokio::main]`. Calling `.send_sync()` on builders from this client will panic.
+    pub fn new_async(target: Target) -> Self {
+        log::debug!("Creating async-only client");
+        Self { target, async_client: Some(AsyncClient::new()), sync_client: None }
+    }
+
+    /// Creates a **sync-only** client. **Must not** be called from within an async context
+    /// (inside `#[tokio::main]` or similar) — doing so panics. Calling `.send()` on builders
+    /// from this client will panic with a message pointing to [`Client::new_async`].
+    ///
+    /// # Panics
+    ///
+    /// Panics at construction time if called inside a tokio runtime (same restriction as
+    /// `reqwest::blocking::Client`). Prefer [`Client::new_async`] for async contexts.
+    pub fn new_sync(target: Target) -> Self {
+        log::debug!("Creating sync-only client");
+        Self { target, async_client: None, sync_client: Some(BlockingClient::new()) }
+    }
+
+    /// Creates a client supporting **both** async and blocking sends.
+    ///
+    /// # Panics
+    ///
+    /// **Panics immediately if called from within an async context** (e.g. inside
+    /// `#[tokio::main]`, `tokio::spawn`, or any `.await` call chain). This happens because
+    /// `reqwest::blocking::Client` creates its own internal tokio runtime, and Rust/tokio
+    /// forbids nesting two runtimes in the same thread.
+    ///
+    /// If you are in an async context, use [`Client::new_async`] instead.
+    /// If you only need blocking calls, use [`Client::new_sync`] **before** entering any runtime.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// // Correct — called from synchronous main before any async runtime starts
+    /// fn main() {
+    ///     let client = Client::new(Target::Localhost(8080));
+    ///     // ... use client.send_sync() and client.send() via manual runtime
+    /// }
+    ///
+    /// // WRONG — will panic at runtime:
+    /// // #[tokio::main]
+    /// // async fn main() { let client = Client::new(...); }  // panics!
+    /// ```
     pub fn new(target: Target) -> Self {
-        log::debug!("Creating client");
+        // Detect async context early: tokio sets a thread-local when a runtime is active.
+        // try_current() succeeds only if we are already inside a tokio runtime — exactly
+        // the forbidden case for BlockingClient, so we panic with an actionable message.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            panic!(
+                "Client::new() called inside an async context (tokio runtime detected). \
+                 BlockingClient cannot be created inside an existing runtime.\n\
+                 → Use Client::new_async(target) if you only need .send() (async).\n\
+                 → Use Client::new_sync(target) called before entering any async runtime if you only need .send_sync()."
+            );
+        }
+        log::debug!("Creating dual async+sync client");
         Self {
             target,
-            async_client: AsyncClient::new(),
-            sync_client: BlockingClient::new(),
+            async_client: Some(AsyncClient::new()),
+            sync_client: Some(BlockingClient::new()),
         }
+    }
+
+    fn async_client(&self) -> &AsyncClient {
+        self.async_client.as_ref()
+            .expect("Client was created with new_sync() — call new_async() or new() to use async sends")
+    }
+
+    fn sync_client(&self) -> &BlockingClient {
+        self.sync_client.as_ref()
+            .expect("Client was created with new_async() — call new_sync() or new() to use sync sends")
     }
 
     /// Returns the base URL derived from the configured [`Target`].
@@ -174,20 +287,6 @@ impl Client {
 /// [`json`](RequestBuilder::json) or query parameters via [`query`](RequestBuilder::query),
 /// or finalise directly with [`send`](RequestBuilder::send) /
 /// [`send_sync`](RequestBuilder::send_sync).
-///
-/// # Example
-/// ```rust,no_run
-/// # use serde::Deserialize;
-/// # #[derive(Deserialize)] struct Status { ok: bool }
-/// # async fn example(client: &Client) -> Result<(), reqwest::Error> {
-/// // Async plain GET
-/// let status: Status = client.get("/health").send().await?;
-///
-/// // Sync plain DELETE
-/// let _: Status = client.delete("/session").send_sync()?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct RequestBuilder<'a> {
     client: &'a Client,
     method: HttpMethod,
@@ -258,7 +357,7 @@ impl<'a> RequestBuilder<'a> {
     pub async fn send<R: DeserializeOwned>(self) -> Result<R, reqwest::Error> {
         let url = build_url(&self.client.base_url(), &self.endpoint);
         log::info!("Sending async {:?} to '{}'", self.method, url);
-        let resp = self.method.apply_async(&self.client.async_client, &url)
+        let resp = self.method.apply_async(&self.client.async_client(), &url)
             .send().await?;
         log::debug!("Response status: {}", resp.status());
         resp.json::<R>().await
@@ -278,10 +377,61 @@ impl<'a> RequestBuilder<'a> {
     pub fn send_sync<R: DeserializeOwned>(self) -> Result<R, reqwest::Error> {
         let url = build_url(&self.client.base_url(), &self.endpoint);
         log::info!("Sending sync {:?} to '{}'", self.method, url);
-        let resp = self.method.apply_sync(&self.client.sync_client, &url)
+        let resp = self.method.apply_sync(&self.client.sync_client(), &url)
             .send()?;
         log::debug!("Response status: {}", resp.status());
         resp.json::<R>()
+    }
+
+    /// Attaches a VEIL-sealed body, transitioning to [`EncryptedBodyRequestBuilder`].
+    ///
+    /// The body is VEIL-sealed with the given [`SerializationKey`] and sent as
+    /// `application/octet-stream`; the response is opened with the same key.
+    /// For plain-JSON routes use `.json(body)` instead.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use bincode::{Encode, Decode};
+    /// # #[derive(Encode)] struct Req { value: i32 }
+    /// # #[derive(Decode)] struct Resp { result: i32 }
+    /// # async fn example(client: &Client) -> Result<(), toolkit_zero::socket::client::ClientError> {
+    /// use toolkit_zero::socket::SerializationKey;
+    /// let resp: Resp = client
+    ///     .post("/compute")
+    ///     .encryption(Req { value: 42 }, SerializationKey::Default)
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn encryption<T: bincode::Encode>(self, body: T, key: SerializationKey) -> EncryptedBodyRequestBuilder<'a, T> {
+        log::trace!("Attaching encrypted body to {:?} request for '{}'", self.method, self.endpoint);
+        EncryptedBodyRequestBuilder { client: self.client, method: self.method, endpoint: self.endpoint, body, key }
+    }
+
+    /// Attaches VEIL-sealed query parameters, transitioning to [`EncryptedQueryRequestBuilder`].
+    ///
+    /// The params are VEIL-sealed and sent as `?data=<base64url>`; the response is opened
+    /// with the same key. For plain-JSON query routes use `.query(params)` instead.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use bincode::{Encode, Decode};
+    /// # #[derive(Encode)] struct Filter { page: u32 }
+    /// # #[derive(Decode)] struct Page { items: Vec<String> }
+    /// # async fn example(client: &Client) -> Result<(), toolkit_zero::socket::client::ClientError> {
+    /// use toolkit_zero::socket::SerializationKey;
+    /// let page: Page = client
+    ///     .get("/items")
+    ///     .encrypted_query(Filter { page: 1 }, SerializationKey::Default)
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn encrypted_query<T: bincode::Encode>(self, params: T, key: SerializationKey) -> EncryptedQueryRequestBuilder<'a, T> {
+        log::trace!("Attaching encrypted query to {:?} request for '{}'", self.method, self.endpoint);
+        EncryptedQueryRequestBuilder { client: self.client, method: self.method, endpoint: self.endpoint, params, key }
     }
 }
 
@@ -338,7 +488,7 @@ impl<'a, T: Serialize> JsonRequestBuilder<'a, T> {
     pub async fn send<R: DeserializeOwned>(self) -> Result<R, reqwest::Error> {
         let url = build_url(&self.client.base_url(), &self.endpoint);
         log::info!("Sending async {:?} with JSON body to '{}'", self.method, url);
-        let resp = self.method.apply_async(&self.client.async_client, &url)
+        let resp = self.method.apply_async(&self.client.async_client(), &url)
             .json(&self.body)
             .send().await?;
         log::debug!("Response status: {}", resp.status());
@@ -363,7 +513,7 @@ impl<'a, T: Serialize> JsonRequestBuilder<'a, T> {
     pub fn send_sync<R: DeserializeOwned>(self) -> Result<R, reqwest::Error> {
         let url = build_url(&self.client.base_url(), &self.endpoint);
         log::info!("Sending sync {:?} with JSON body to '{}'", self.method, url);
-        let resp = self.method.apply_sync(&self.client.sync_client, &url)
+        let resp = self.method.apply_sync(&self.client.sync_client(), &url)
             .json(&self.body)
             .send()?;
         log::debug!("Response status: {}", resp.status());
@@ -424,7 +574,7 @@ impl<'a, T: Serialize> QueryRequestBuilder<'a, T> {
     pub async fn send<R: DeserializeOwned>(self) -> Result<R, reqwest::Error> {
         let url = build_url(&self.client.base_url(), &self.endpoint);
         log::info!("Sending async {:?} with query params to '{}'", self.method, url);
-        let resp = self.method.apply_async(&self.client.async_client, &url)
+        let resp = self.method.apply_async(&self.client.async_client(), &url)
             .query(&self.params)
             .send().await?;
         log::debug!("Response status: {}", resp.status());
@@ -449,10 +599,168 @@ impl<'a, T: Serialize> QueryRequestBuilder<'a, T> {
     pub fn send_sync<R: DeserializeOwned>(self) -> Result<R, reqwest::Error> {
         let url = build_url(&self.client.base_url(), &self.endpoint);
         log::info!("Sending sync {:?} with query params to '{}'", self.method, url);
-        let resp = self.method.apply_sync(&self.client.sync_client, &url)
+        let resp = self.method.apply_sync(&self.client.sync_client(), &url)
             .query(&self.params)
             .send()?;
         log::debug!("Response status: {}", resp.status());
         resp.json::<R>()
+    }
+}
+
+// ─── ClientError ─────────────────────────────────────────────────────────────
+
+/// Error returned by [`EncryptedBodyRequestBuilder`] and [`EncryptedQueryRequestBuilder`].
+///
+/// Wraps either a transport-level [`reqwest::Error`] or a VEIL cipher failure.
+#[derive(Debug)]
+pub enum ClientError {
+    /// The underlying HTTP transport failed (connection refused, timeout, etc.).
+    Transport(reqwest::Error),
+    /// VEIL sealing or opening failed (wrong key, corrupted bytes, etc.).
+    Serialization(SerializationError),
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(e)      => write!(f, "transport error: {e}"),
+            Self::Serialization(e)  => write!(f, "serialization error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {}
+
+impl From<reqwest::Error> for ClientError {
+    fn from(e: reqwest::Error) -> Self { Self::Transport(e) }
+}
+
+impl From<SerializationError> for ClientError {
+    fn from(e: SerializationError) -> Self { Self::Serialization(e) }
+}
+
+// ─── EncryptedBodyRequestBuilder ─────────────────────────────────────────────
+
+/// A request builder that VEIL-seals the body before sending.
+///
+/// Obtained from [`RequestBuilder::encryption`]. Finalise with
+/// [`send`](EncryptedBodyRequestBuilder::send) (async) or
+/// [`send_sync`](EncryptedBodyRequestBuilder::send_sync) (sync).
+///
+/// The expected response is also VEIL-sealed and is opened transparently.
+pub struct EncryptedBodyRequestBuilder<'a, T> {
+    client: &'a Client,
+    method: HttpMethod,
+    endpoint: String,
+    body: T,
+    key: SerializationKey,
+}
+
+impl<'a, T: bincode::Encode> EncryptedBodyRequestBuilder<'a, T> {
+    /// Sends the request asynchronously.
+    ///
+    /// Before the request leaves, the body is VEIL-sealed using the [`SerializationKey`]
+    /// supplied to [`.encryption()`](RequestBuilder::encryption).  The server receives a
+    /// raw `application/octet-stream` payload.  When the response arrives, its bytes are
+    /// VEIL-opened with the same key to produce `R`.  If either sealing or opening fails
+    /// the error is wrapped in [`ClientError::Serialization`].
+    pub async fn send<R>(self) -> Result<R, ClientError>
+    where
+        R: bincode::Decode<()>,
+    {
+        let url = build_url(&self.client.base_url(), &self.endpoint);
+        log::info!("Sending async {:?} with encrypted body to '{}'", self.method, url);
+        let sealed = crate::serialization::seal(&self.body, self.key.veil_key())?;
+        let resp = self.method.apply_async(&self.client.async_client(), &url)
+            .header("content-type", "application/octet-stream")
+            .body(sealed)
+            .send().await?;
+        log::debug!("Response status: {}", resp.status());
+        let bytes = resp.bytes().await?;
+        Ok(crate::serialization::open::<R>(&bytes, self.key.veil_key())?)
+    }
+
+    /// Sends the request synchronously.
+    ///
+    /// The body is VEIL-sealed with the configured [`SerializationKey`] before the wire
+    /// send.  The response bytes, once received, are VEIL-opened with the same key to
+    /// produce `R`.  Any cipher failure is wrapped in [`ClientError::Serialization`].
+    pub fn send_sync<R>(self) -> Result<R, ClientError>
+    where
+        R: bincode::Decode<()>,
+    {
+        let url = build_url(&self.client.base_url(), &self.endpoint);
+        log::info!("Sending sync {:?} with encrypted body to '{}'", self.method, url);
+        let sealed = crate::serialization::seal(&self.body, self.key.veil_key())?;
+        let resp = self.method.apply_sync(&self.client.sync_client(), &url)
+            .header("content-type", "application/octet-stream")
+            .body(sealed)
+            .send()?;
+        log::debug!("Response status: {}", resp.status());
+        let bytes = resp.bytes()?;
+        Ok(crate::serialization::open::<R>(&bytes, self.key.veil_key())?)
+    }
+}
+
+// ─── EncryptedQueryRequestBuilder ────────────────────────────────────────────
+
+/// A request builder that VEIL-seals query params and sends them as `?data=<base64url>`.
+///
+/// Obtained from [`RequestBuilder::encrypted_query`]. Finalise with
+/// [`send`](EncryptedQueryRequestBuilder::send) (async) or
+/// [`send_sync`](EncryptedQueryRequestBuilder::send_sync) (sync).
+///
+/// The expected response is also VEIL-sealed and is opened transparently.
+pub struct EncryptedQueryRequestBuilder<'a, T> {
+    client: &'a Client,
+    method: HttpMethod,
+    endpoint: String,
+    params: T,
+    key: SerializationKey,
+}
+
+impl<'a, T: bincode::Encode> EncryptedQueryRequestBuilder<'a, T> {
+    /// Sends the request asynchronously.
+    ///
+    /// The params are VEIL-sealed with the configured [`SerializationKey`] and
+    /// base64url-encoded, then appended to the URL as `?data=<base64url>`.  When the
+    /// response arrives, its bytes are VEIL-opened with the same key to produce `R`.
+    /// Any cipher failure is wrapped in [`ClientError::Serialization`].
+    pub async fn send<R>(self) -> Result<R, ClientError>
+    where
+        R: bincode::Decode<()>,
+    {
+        let url = build_url(&self.client.base_url(), &self.endpoint);
+        log::info!("Sending async {:?} with encrypted query to '{}'", self.method, url);
+        let sealed = crate::serialization::seal(&self.params, self.key.veil_key())?;
+        let b64 = URL_SAFE_NO_PAD.encode(&sealed);
+        let resp = self.method.apply_async(&self.client.async_client(), &url)
+            .query(&[("data", &b64)])
+            .send().await?;
+        log::debug!("Response status: {}", resp.status());
+        let bytes = resp.bytes().await?;
+        Ok(crate::serialization::open::<R>(&bytes, self.key.veil_key())?)
+    }
+
+    /// Sends the request synchronously.
+    ///
+    /// Same behaviour as [`send`](Self::send) — params are VEIL-sealed and base64url-encoded
+    /// as `?data=<value>`, and the sealed response bytes are VEIL-opened to `R` — but the
+    /// network call blocks the current thread.  Any cipher failure is wrapped in
+    /// [`ClientError::Serialization`].
+    pub fn send_sync<R>(self) -> Result<R, ClientError>
+    where
+        R: bincode::Decode<()>,
+    {
+        let url = build_url(&self.client.base_url(), &self.endpoint);
+        log::info!("Sending sync {:?} with encrypted query to '{}'", self.method, url);
+        let sealed = crate::serialization::seal(&self.params, self.key.veil_key())?;
+        let b64 = URL_SAFE_NO_PAD.encode(&sealed);
+        let resp = self.method.apply_sync(&self.client.sync_client(), &url)
+            .query(&[("data", &b64)])
+            .send()?;
+        log::debug!("Response status: {}", resp.status());
+        let bytes = resp.bytes()?;
+        Ok(crate::serialization::open::<R>(&bytes, self.key.veil_key())?)
     }
 }
