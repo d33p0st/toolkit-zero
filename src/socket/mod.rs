@@ -141,11 +141,41 @@
 //! # }
 //! ```
 
-#[cfg(any(feature = "socket", feature="socket-server"))]
+// ─── Serialization key (shared by server and client) ────────────────────────
+
+/// Controls which VEIL key is used when the body or query parameters are sealed.
+///
+/// Pass this to [`server::ServerMechanism::encryption`], [`server::ServerMechanism::encrypted_query`],
+/// [`client::RequestBuilder::encryption`], and [`client::RequestBuilder::encrypted_query`].
+/// For plain-JSON routes use the existing `.json()` / `.query()` builder methods instead.
+///
+/// | Variant | Wire format | Trait requirements on `T` |
+/// |---|---|---|
+/// | `Default` | VEIL-sealed bytes (`application/octet-stream`) | `bincode::Encode` / `Decode<()>` |
+/// | `Value(key)` | VEIL-sealed bytes with a custom key | `bincode::Encode` / `Decode<()>` |
+#[derive(Clone)]
+pub enum SerializationKey {
+    /// Use the built-in default VEIL key (`"serialization/deserialization"`).
+    Default,
+    /// Use a custom VEIL key shared by both client and server.
+    Value(String),
+}
+
+impl SerializationKey {
+    #[doc(hidden)]
+    pub fn veil_key(&self) -> Option<&str> {
+        match self {
+            Self::Default => None,
+            Self::Value(k) => Some(k.as_str()),
+        }
+    }
+}
+
+#[cfg(feature = "socket-server")]
 pub mod server;
 
-#[cfg(any(feature = "socket", feature="socket-client"))]
+#[cfg(feature = "socket-client")]
 pub mod client;
 
-#[cfg(any(feature = "socket", any(feature="socket-server", feature="socket-client")))]
+#[cfg(any(feature = "socket-server", feature = "socket-client"))]
 pub mod prelude;

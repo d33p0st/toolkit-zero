@@ -1,35 +1,55 @@
 [package]
 name = "toolkit-zero"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
 description = "A feature-selective Rust utility toolkit — a growing collection of categorized utilities you can opt into via Cargo features, including only what you need."
 license = "MIT"
+repository = "https://github.com/d33p0st/toolkit-zero.git"
+homepage = "https://d33p0st.github.io/toolkit-zero/"
+readme = "README.md"
 
 [dependencies]
+base64 = { version = "0.22", optional = true }
+bincode = { version = "2", optional = true }
+bytes = { version = "1", optional = true }
 log = { version = "0.4.29", optional = true }
 reqwest = { version = "0.13.2", optional = true, features = ["blocking", "json", "query"] }
 serde = { version = "1.0.228", optional = true }
-tokio = { version = "1.50.0", features = ["rt"], optional = true }
+serde_json = { version = "1", optional = true }
+serde_urlencoded = { version = "0.7", optional = true }
+tokio = { version = "1.50.0", features = ["rt", "sync", "net"], optional = true }
 warp = { version = "0.4.2", optional = true }
+webbrowser = { version = "0.8", optional = true }
 
 [features]
 default = []
+serialization = ["dep:bincode", "dep:base64"]
 socket = ["socket-server", "socket-client"]
 socket-server = [
-    "dep:reqwest",
+    "serialization",
+    "dep:bytes",
     "dep:serde",
+    "serde/derive",
+    "dep:serde_urlencoded",
     "dep:warp",
     "warp/server",
     "dep:log",
     "dep:tokio",
     "tokio/rt",
+    "tokio/net",
+    "tokio/sync",
 ]
 socket-client = [
+    "serialization",
     "dep:reqwest",
     "reqwest/blocking",
     "reqwest/json",
     "reqwest/query",
     "dep:serde",
     "serde/derive",
+    "dep:tokio",
+    "tokio/rt",
     "dep:log",
 ]
+location = ["location-native"]
+location-native = ["socket-server", "dep:webbrowser", "dep:tokio", "tokio/rt", "tokio/sync", "dep:serde"]
