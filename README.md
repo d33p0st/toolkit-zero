@@ -19,6 +19,7 @@ A feature-selective Rust utility toolkit. Pull in only the modules you need via 
    - [Serving the server](#serving-the-server)
    - [Graceful shutdown](#graceful-shutdown)
    - [Building responses](#building-responses)
+   - [Sync handlers](#sync-handlers)
 5. [Socket — client](#socket--client)
    - [Creating a client](#creating-a-client)
    - [Plain requests](#plain-requests)
@@ -67,25 +68,25 @@ Add to `Cargo.toml`:
 ```toml
 [dependencies]
 # VEIL cipher only
-toolkit-zero = { version = "3", features = ["serialization"] }
+toolkit-zero = { version = "3.1", features = ["serialization"] }
 
 # HTTP server only
-toolkit-zero = { version = "3", features = ["socket-server"] }
+toolkit-zero = { version = "3.1", features = ["socket-server"] }
 
 # HTTP client only
-toolkit-zero = { version = "3", features = ["socket-client"] }
+toolkit-zero = { version = "3.1", features = ["socket-client"] }
 
 # Both sides
-toolkit-zero = { version = "3", features = ["socket"] }
+toolkit-zero = { version = "3.1", features = ["socket"] }
 
 # Geolocation (pulls in socket-server automatically)
-toolkit-zero = { version = "3", features = ["location"] }
+toolkit-zero = { version = "3.1", features = ["location"] }
 
 # Full time-lock encryption suite
-toolkit-zero = { version = "3", features = ["encryption"] }
+toolkit-zero = { version = "3.1", features = ["encryption"] }
 
 # Re-export deps alongside socket-server
-toolkit-zero = { version = "3", features = ["socket-server", "backend-deps"] }
+toolkit-zero = { version = "3.1", features = ["socket-server", "backend-deps"] }
 ```
 
 ---
@@ -179,25 +180,44 @@ server.mechanism(
 
 ### Query parameter routes
 
-Call `.query::<T>()` on the mechanism.  The URL query string is deserialised before the handler runs; the handler receives a ready-to-use `T`.  `T` must implement `serde::Deserialize`.
+Call `.query::<T>()` on the mechanism.  When a request arrives, warp deserialises
+the URL query string into `T` before calling the handler — the handler receives a
+ready-to-use value.  `T` must implement `serde::Deserialize`.
+
+**URL shape the server expects:**
+
+```
+GET /search?q=hello&page=2
+```
+
+Each field of `T` maps to one `key=value` pair.  Nested structs are not supported
+by `serde_urlencoded`; keep query types flat.
 
 ```rust
 use serde::Deserialize;
 use toolkit_zero::socket::server::{Server, ServerMechanism, reply};
 
 #[derive(Deserialize)]
-struct SearchParams { q: String, page: u32 }
+struct SearchParams {
+    q:    String,  // ?q=hello
+    page: u32,     // &page=2
+}
 
 let mut server = Server::default();
 server.mechanism(
+    // Listens on GET /search?q=<string>&page=<u32>
     ServerMechanism::get("/search")
         .query::<SearchParams>()
         .onconnect(|params: SearchParams| async move {
-            // params.q and params.page are ready to use
+            // params.q  == "hello"
+            // params.page == 2
             reply!()
         })
 );
 ```
+
+Missing or malformed query parameters cause warp to return `400 Bad Request`
+before the handler is invoked.
 
 ### Shared state
 
@@ -296,6 +316,10 @@ For encrypted query parameters, the client sends `?data=<base64url>` where the v
 server.serve(([0, 0, 0, 0], 8080)).await;
 ```
 
+> **Note:** Routes are evaluated in **registration order** — the first matching route wins.
+> `serve()`, `serve_with_graceful_shutdown()`, and `serve_from_listener()` all panic immediately
+> if called on a `Server` with no routes registered.
+
 ### Graceful shutdown
 
 ```rust
@@ -337,6 +361,33 @@ Use the `reply!` macro:
 
 `Status` re-exports the most common HTTP status codes as named variants (`Status::Ok`, `Status::Created`, `Status::NoContent`, `Status::BadRequest`, `Status::Forbidden`, `Status::NotFound`, `Status::InternalServerError`).
 
+### Sync handlers
+
+Every route finaliser (`onconnect`) has an `unsafe` blocking counterpart — `onconnect_sync` — for cases where an existing blocking API cannot easily be made async.  **Not recommended for production traffic.**
+
+```rust
+use toolkit_zero::socket::server::{Server, ServerMechanism, reply};
+
+let mut server = Server::default();
+
+// SAFETY: handler is fast; no shared mutable state; backpressure applied externally
+unsafe {
+    server.mechanism(
+        ServerMechanism::get("/ping").onconnect_sync(|| {
+            reply!()
+        })
+    );
+}
+```
+
+`unsafe` is required because `onconnect_sync` dispatches to Tokio's blocking thread pool, which carries important caveats:
+
+- The pool caps live OS threads at 512 (default), but the **waiting-task queue is unbounded**.  Under a traffic surge, tasks accumulate without limit, leading to OOM or severe latency before any queued task executes.
+- Any panic inside the handler is silently converted to a `Rejection`, masking runtime errors.
+- When the handler holds a lock (e.g. `Arc<Mutex<_>>`), lock contention across concurrent blocking tasks can stall the thread pool indefinitely.
+
+`onconnect_sync` is available on every builder variant: plain, `.json`, `.query`, `.state`, and their combinations.  All have identical safety requirements.
+
 ---
 
 ## Socket — client
@@ -363,9 +414,24 @@ let client = Client::new(Target::Localhost(8080));
 let client = Client::new_async(Target::Remote("https://api.example.com".into()));
 ```
 
-> **Note:** `Client::new()` and `Client::new_sync()` panic if called from within
-> an existing Tokio runtime (e.g. inside `#[tokio::main]`).
-> Use `Client::new_async()` when your program is async-first.
+| Constructor | `.send()` async | `.send_sync()` blocking | Safe inside `#[tokio::main]` |
+|---|---|---|---|
+| `Client::new_async(target)` | ✓ | ✗ — panics at call site | ✓ |
+| `Client::new_sync(target)` | ✗ — panics at call site | ✓ | ✗ — panics at construction |
+| `Client::new(target)` | ✓ | ✓ | ✗ — panics at construction |
+
+> **Why `Client::new()` and `Client::new_sync()` panic inside an async context:**
+> `reqwest::blocking::Client` creates its own single-threaded Tokio runtime internally.
+> Tokio does not allow a runtime to start while another is already running on the same thread.
+> `Client::new()` proactively detects this via `tokio::runtime::Handle::try_current()` and
+> panics **at construction time** with an actionable message before any field is initialised.
+> `Client::new_sync()` fails the same way through `reqwest` during construction.
+>
+> **Rule of thumb:**
+> - Async program (`#[tokio::main]`) → use `Client::new_async()`.
+> - Sync program with no runtime → use `Client::new_sync()` or `Client::new()`.
+> - Mixed program (sync `main`, manual `tokio::Runtime`) → build the `Client` *before* starting
+>   the runtime.
 
 ### Plain requests
 
@@ -406,23 +472,38 @@ let created: Item = client
 
 ### Query parameter requests
 
-Attach query parameters with `.query(value)`.  `value` must implement `serde::Serialize`.  Fields are appended to the URL as `?field=value&...`.
+Attach query parameters with `.query(value)`.  `value` must implement
+`serde::Serialize`.  The fields are serialised by `serde_urlencoded` and
+appended to the request URL as `?key=value&...`.
+
+**URL the client will send:**
+
+```
+GET /items?status=active&page=1
+```
 
 ```rust
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
-struct Filter { status: String, page: u32 }
+struct Filter {
+    status: String,  // becomes ?status=active
+    page:   u32,     // becomes &page=1
+}
 
 #[derive(Deserialize)]
 struct Item { id: u32, name: String }
 
+// Sends: GET /items?status=active&page=1
 let items: Vec<Item> = client
     .get("/items")
     .query(Filter { status: "active".into(), page: 1 })
     .send()
     .await?;
 ```
+
+Field order in the URL is determined by struct field declaration order.  Keep
+query structs flat — nested structs are not supported by `serde_urlencoded`.
 
 ### VEIL-encrypted requests
 
@@ -460,10 +541,17 @@ Both `.send()` and `.send_sync()` are available on encrypted builders, returning
 
 ### Sync vs async sends
 
-| Method | Blocks | Requires |
+| Method | Blocks the thread | Requires constructor |
 |---|---|---|
-| `.send().await` | No | `Client::new_async()` or `Client::new()` |
-| `.send_sync()` | Yes | `Client::new_sync()` or `Client::new()` |
+| `.send().await` | No | `Client::new_async()` **or** `Client::new()` |
+| `.send_sync()` | Yes | `Client::new_sync()` **or** `Client::new()` |
+
+Using the wrong variant panics **at the call site** with an explicit message pointing to the correct constructor:
+
+- Calling `.send()` on a `new_sync()` client → *`"Client was created with new_sync() — call new_async() or new() to use async sends"`*
+- Calling `.send_sync()` on a `new_async()` client → *`"Client was created with new_async() — call new_sync() or new() to use sync sends"`*
+
+These call-site panics are distinct from the **construction-time** panic that `Client::new()` (and `Client::new_sync()`) raises when constructed inside an active Tokio runtime — see [Creating a client](#creating-a-client).
 
 ---
 
@@ -655,7 +743,7 @@ Each re-export inside `backend_deps` is individually gated on its parent feature
 
 ```toml
 # Example: socket-server + dep re-exports
-toolkit-zero = { version = "3", features = ["socket-server", "backend-deps"] }
+toolkit-zero = { version = "3.1", features = ["socket-server", "backend-deps"] }
 ```
 
 Then in your code:
