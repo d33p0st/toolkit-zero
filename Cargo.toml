@@ -1,6 +1,6 @@
 [package]
 name = "toolkit-zero"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A feature-selective Rust utility toolkit — a growing collection of categorized utilities you can opt into via Cargo features, including only what you need."
