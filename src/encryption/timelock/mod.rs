@@ -68,16 +68,17 @@
 //!
 //! ```no_run
 //! use toolkit_zero::encryption::timelock::{
-//!     derive_key_now, derive_key_at,
+//!     timelock, TimeLockCadence,
 //!     KdfPreset, TimeLockSalts, TimeLockTime,
 //!     TimePrecision, TimeFormat,
 //! };
 //!
 //! // ── Encryption side ───────────────────────────────────────────────────
-//! let salts = TimeLockSalts::generate();  // store in ciphertext header
+//! let salts     = TimeLockSalts::generate();  // store in ciphertext header
 //! let lock_time = TimeLockTime::new(14, 37).unwrap(); // 14:37 local time
-//! let enc_key = derive_key_at(
-//!     lock_time,
+//! let enc_key = timelock(
+//!     TimeLockCadence::None,
+//!     Some(lock_time),
 //!     TimePrecision::Minute,
 //!     TimeFormat::Hour24,
 //!     &salts,
@@ -87,13 +88,15 @@
 //!
 //! // ── Decryption side ───────────────────────────────────────────────────
 //! // Load salts + precision/format from header; call at 14:37 local time.
-//! let dec_key = derive_key_now(
+//! let dec_key = timelock(
+//!     TimeLockCadence::None,
+//!     None,
 //!     TimePrecision::Minute,
 //!     TimeFormat::Hour24,
 //!     &salts,
 //!     &KdfPreset::Balanced.params(),
 //! ).unwrap();
-//! assert_eq!(enc_key.as_bytes(), dec_key.as_bytes()); // identical keys
+//! // enc_key.as_bytes() == dec_key.as_bytes() when called at 14:37 local time
 //! ```
 
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input"))]
@@ -101,6 +104,11 @@ mod helper;
 
 #[cfg(feature = "backend-deps")]
 pub mod backend_deps;
+
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+pub mod utility;
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+pub use utility::{TimeLockParams, pack, unpack};
 
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -147,6 +155,277 @@ pub enum TimeFormat {
     Hour12,
 }
 
+// ─── schedule cadence ────────────────────────────────────────────────────────
+
+/// Day of the week, Monday-based (Mon = 0 … Sun = 6).
+///
+/// Used as a component of [`TimeLockCadence`] to bind key derivation to a
+/// specific weekday.
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+impl Weekday {
+    /// The full English name of this weekday (e.g. `"Tuesday"`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Monday    => "Monday",
+            Self::Tuesday   => "Tuesday",
+            Self::Wednesday => "Wednesday",
+            Self::Thursday  => "Thursday",
+            Self::Friday    => "Friday",
+            Self::Saturday  => "Saturday",
+            Self::Sunday    => "Sunday",
+        }
+    }
+
+    /// Zero-based weekday number (Monday = 0, …, Sunday = 6).
+    pub fn number(self) -> u8 {
+        match self {
+            Self::Monday    => 0,
+            Self::Tuesday   => 1,
+            Self::Wednesday => 2,
+            Self::Thursday  => 3,
+            Self::Friday    => 4,
+            Self::Saturday  => 5,
+            Self::Sunday    => 6,
+        }
+    }
+
+    /// Convert from a `chrono::Weekday` value (used by the `_now` derivation path).
+    #[cfg(feature = "enc-timelock-keygen-now")]
+    pub(crate) fn from_chrono(w: chrono::Weekday) -> Self {
+        match w {
+            chrono::Weekday::Mon => Self::Monday,
+            chrono::Weekday::Tue => Self::Tuesday,
+            chrono::Weekday::Wed => Self::Wednesday,
+            chrono::Weekday::Thu => Self::Thursday,
+            chrono::Weekday::Fri => Self::Friday,
+            chrono::Weekday::Sat => Self::Saturday,
+            chrono::Weekday::Sun => Self::Sunday,
+        }
+    }
+}
+
+/// Month of the year (January = 1 … December = 12).
+///
+/// Used as a component of [`TimeLockCadence`] to bind key derivation to a
+/// specific calendar month.
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Month {
+    January,
+    February,
+    March,
+    April,
+    May,
+    June,
+    July,
+    August,
+    September,
+    October,
+    November,
+    December,
+}
+
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+impl Month {
+    /// The full English name of this month (e.g. `"February"`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::January   => "January",
+            Self::February  => "February",
+            Self::March     => "March",
+            Self::April     => "April",
+            Self::May       => "May",
+            Self::June      => "June",
+            Self::July      => "July",
+            Self::August    => "August",
+            Self::September => "September",
+            Self::October   => "October",
+            Self::November  => "November",
+            Self::December  => "December",
+        }
+    }
+
+    /// 1-based month number (January = 1, …, December = 12).
+    pub fn number(self) -> u8 {
+        match self {
+            Self::January   => 1,
+            Self::February  => 2,
+            Self::March     => 3,
+            Self::April     => 4,
+            Self::May       => 5,
+            Self::June      => 6,
+            Self::July      => 7,
+            Self::August    => 8,
+            Self::September => 9,
+            Self::October   => 10,
+            Self::November  => 11,
+            Self::December  => 12,
+        }
+    }
+
+    /// Maximum number of days in this month.
+    ///
+    /// February = 28 (leap years are intentionally ignored — the cadence
+    /// policy is meant to be stable across years).
+    pub fn max_days(self) -> u8 {
+        match self {
+            Self::February => 28,
+            Self::April | Self::June | Self::September | Self::November => 30,
+            _ => 31,
+        }
+    }
+
+    /// Construct from a 1-based month number (1 = January … 12 = December).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` is outside 1–12.
+    #[cfg(feature = "enc-timelock-keygen-now")]
+    pub(crate) fn from_number(n: u8) -> Self {
+        match n {
+            1  => Self::January,
+            2  => Self::February,
+            3  => Self::March,
+            4  => Self::April,
+            5  => Self::May,
+            6  => Self::June,
+            7  => Self::July,
+            8  => Self::August,
+            9  => Self::September,
+            10 => Self::October,
+            11 => Self::November,
+            12 => Self::December,
+            _  => panic!("Month::from_number: invalid month number {}", n),
+        }
+    }
+}
+
+/// Cadence component of a scheduled time-lock — binds key derivation to a
+/// recurring calendar pattern **in addition to** the time-of-day constraint.
+///
+/// Pair with a [`TimeLockTime`] (encryption path) to express policies like:
+///
+/// - *"only on Tuesdays at 18:00"* — `DayOfWeek(Weekday::Tuesday)` + 18h
+/// - *"only on the 1st at 00:00"* — `DayOfMonth(1)` + 0h
+/// - *"every Tuesday in February at 06:00"* — `DayOfWeekInMonth(Weekday::Tuesday, Month::February)` + 6h
+///
+/// On the decryption side, pass [`pack`] the cadence (along with precision
+/// and format) to obtain a [`TimeLockParams`] to store in the ciphertext
+/// header, then call [`derive_key_scheduled_now`] with those params.
+///
+/// `TimeLockCadence::None` is equivalent to a plain [`derive_key_at`] call —
+/// no calendar dimension is mixed into the KDF input.
+///
+/// # Panics
+///
+/// Constructing [`DayOfMonthInMonth`](TimeLockCadence::DayOfMonthInMonth) is
+/// always valid, but **key derivation panics** if the stored day exceeds the
+/// month's maximum (e.g. day 29 for February, day 31 for April).
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeLockCadence {
+    /// No calendar constraint — behaves like a plain time-lock.
+    ///
+    /// Compact discriminant: `0`.
+    None,
+
+    /// Valid only on the specified weekday.
+    ///
+    /// Compact discriminant: `1`.
+    DayOfWeek(Weekday),
+
+    /// Valid only on the specified day of any month (1–31).
+    ///
+    /// Days 29–31 simply never match in shorter months.
+    ///
+    /// Compact discriminant: `2`.
+    DayOfMonth(u8),
+
+    /// Valid only during the specified month of any year.
+    ///
+    /// Compact discriminant: `3`.
+    MonthOfYear(Month),
+
+    /// Valid only on the specified weekday **and** during the specified month.
+    ///
+    /// Compact discriminant: `4`.
+    DayOfWeekInMonth(Weekday, Month),
+
+    /// Valid only on the specified day of the specified month.
+    ///
+    /// Key derivation panics if the day exceeds the month's maximum.
+    ///
+    /// Compact discriminant: `5`.
+    DayOfMonthInMonth(u8, Month),
+
+    /// Valid only on the specified weekday **and** the specified day of month.
+    ///
+    /// Days 29–31 do not match in shorter months.
+    ///
+    /// Compact discriminant: `6`.
+    DayOfWeekAndDayOfMonth(Weekday, u8),
+}
+
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+impl TimeLockCadence {
+    /// Returns the compact variant discriminant stored in
+    /// [`TimeLockParams::cadence_variant`].
+    pub fn variant_id(self) -> u8 {
+        match self {
+            Self::None                         => 0,
+            Self::DayOfWeek(_)                 => 1,
+            Self::DayOfMonth(_)                => 2,
+            Self::MonthOfYear(_)               => 3,
+            Self::DayOfWeekInMonth(_, _)       => 4,
+            Self::DayOfMonthInMonth(_, _)      => 5,
+            Self::DayOfWeekAndDayOfMonth(_, _) => 6,
+        }
+    }
+
+    /// Produces the cadence prefix baked into the KDF input during the
+    /// encryption (`_at`) path.
+    ///
+    /// The prefix is empty for `None`; otherwise it is `"<component>|"` or
+    /// `"<a>+<b>|"` for composite variants.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `DayOfMonthInMonth(day, month)` has `day > month.max_days()`.
+    pub(crate) fn bake_string(self) -> String {
+        match self {
+            Self::None                          => String::new(),
+            Self::DayOfWeek(w)                  => format!("{}|", w.name()),
+            Self::DayOfMonth(d)                 => format!("{}|", d),
+            Self::MonthOfYear(m)                => format!("{}|", m.name()),
+            Self::DayOfWeekInMonth(w, m)        => format!("{}+{}|", w.name(), m.name()),
+            Self::DayOfMonthInMonth(d, m)       => {
+                let max = m.max_days();
+                if d < 1 || d > max {
+                    panic!(
+                        "TimeLockCadence::DayOfMonthInMonth: day {} is out of range \
+                         1–{} for {}",
+                        d, max, m.name()
+                    );
+                }
+                format!("{}+{}|", d, m.name())
+            }
+            Self::DayOfWeekAndDayOfMonth(w, d)  => format!("{}+{}|", w.name(), d),
+        }
+    }
+}
+
 // ─── explicit time input ──────────────────────────────────────────────────────
 
 /// An explicit time value supplied by the caller for encryption-time key
@@ -163,14 +442,14 @@ pub enum TimeFormat {
 ///
 /// let t = TimeLockTime::new(14, 37).unwrap(); // 14:37 local (2:37 PM)
 /// ```
-#[cfg(feature = "enc-timelock-keygen-input")]
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeLockTime {
     hour:   u32,  // 0–23
     minute: u32,  // 0–59
 }
 
-#[cfg(feature = "enc-timelock-keygen-input")]
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 impl TimeLockTime {
     /// Construct a `TimeLockTime` from a 24-hour `hour` (0–23) and `minute`
     /// (0–59).
@@ -250,36 +529,36 @@ pub struct KdfParams {
 ///
 /// ## Generic (cross-platform)
 ///
-/// Conservative values that are reasonably fast on every platform.  Use these
-/// when you don't know or don't control the target hardware.
+/// Suitable for any platform.  Use these when you don't know or don't control
+/// the target hardware.
 ///
-/// | Preset     | Peak RAM | Est. Mac M2 | Est. x86-64 |
-/// |------------|----------|-------------|-------------|
-/// | `Fast`     | ~64 MiB  | ~50 ms      | ~200 ms     |
-/// | `Balanced` | ~128 MiB | ~470 ms     | ~1.5 s      |
-/// | `Paranoid` | ~512 MiB | ~2 s        | ~8–15 s     |
+/// | Preset     | Peak RAM  | Est. Mac M2 | Est. x86-64  |
+/// |------------|-----------|-------------|--------------|
+/// | `Fast`     | ~128 MiB  | ~500 ms     | ~1.5 s       |
+/// | `Balanced` | ~512 MiB  | ~2 s        | ~8–15 s      |
+/// | `Paranoid` | ~768 MiB  | ~4–6 s      | ~20–30 s     |
 ///
 /// ## Apple Silicon (`*Mac`)
 ///
-/// Harder parameters to compensate for Apple Silicon's superior throughput.
-/// The `BalancedMac` cost is equivalent to the generic `Paranoid` on x86-64.
+/// Harder parameters calibrated for Apple Silicon's superior memory bandwidth.
+/// All three tiers assume at least 8 GiB unified memory (all M-series chips).
 ///
 /// | Preset        | Peak RAM | Est. Mac M2  | Est. Mac M3/M4 |
 /// |---------------|----------|--------------|----------------|
-/// | `FastMac`     | ~64 MiB  | ~50 ms       | faster         |
-/// | `BalancedMac` | ~512 MiB | ~2 s         | faster         |
-/// | `ParanoidMac` | ~1 GiB   | ~5–12 s      | faster         |
+/// | `FastMac`     | ~512 MiB | ~2 s         | faster         |
+/// | `BalancedMac` | ~1 GiB   | ~5–12 s      | faster         |
+/// | `ParanoidMac` | ~3 GiB   | ~30–60 s     | faster         |
 ///
 /// ## x86-64 (`*X86`)
 ///
 /// Equivalent to Generic; provided as explicit named variants so code
 /// documents intent clearly.
 ///
-/// | Preset        | Peak RAM  | Est. x86-64 |
-/// |---------------|-----------|-------------|
-/// | `FastX86`     | ~64 MiB   | ~200 ms     |
-/// | `BalancedX86` | ~128 MiB  | ~1.5 s      |
-/// | `ParanoidX86` | ~512 MiB  | ~8–15 s     |
+/// | Preset        | Peak RAM  | Est. x86-64  |
+/// |---------------|-----------|------------------|
+/// | `FastX86`     | ~128 MiB  | ~1.5 s           |
+/// | `BalancedX86` | ~512 MiB  | ~8–15 s          |
+/// | `ParanoidX86` | ~768 MiB  | ~20–30 s         |
 ///
 /// ## Linux ARM64 (`*Arm`)
 ///
@@ -288,9 +567,9 @@ pub struct KdfParams {
 ///
 /// | Preset        | Peak RAM  | Est. Graviton3 |
 /// |---------------|-----------|----------------|
-/// | `FastArm`     | ~64 MiB   | ~150 ms        |
-/// | `BalancedArm` | ~256 MiB  | ~3 s           |
-/// | `ParanoidArm` | ~512 MiB  | ~10–20 s       |
+/// | `FastArm`     | ~256 MiB  | ~3 s           |
+/// | `BalancedArm` | ~512 MiB  | ~10–20 s       |
+/// | `ParanoidArm` | ~768 MiB  | ~30–50 s       |
 ///
 /// ## Custom
 ///
@@ -301,22 +580,21 @@ pub struct KdfParams {
 pub enum KdfPreset {
     // ── generic (cross-platform) ─────────────────────────────────────────────
 
-    /// Dev / CI only.  64 MiB · scrypt 2¹⁴ · 32 MiB, 2 iters each.
+    /// ~128 MiB · scrypt 2¹⁶ · ~64 MiB, 3 iters each.
     Fast,
-    /// Cross-platform production default.  128 MiB · scrypt 2¹⁶ · 64 MiB, 3 iters each.
+    /// ~512 MiB · scrypt 2¹⁷ · ~256 MiB, 4 iters each.
     Balanced,
-    /// Cross-platform high security.  512 MiB · scrypt 2¹⁷ · 256 MiB, 4 iters each.
+    /// ~768 MiB · scrypt 2¹⁸ · ~512 MiB, 5 iters each.
     Paranoid,
 
     // ── Apple Silicon ─────────────────────────────────────────────────────────
 
-    /// Dev / CI on macOS.  Same params as `Fast`; named for intent clarity.
+    /// Dev / CI on macOS.  ~512 MiB · scrypt 2¹⁷ · ~256 MiB, 4 iters each.
     FastMac,
-    /// Production on macOS (Apple Silicon).  512 MiB · scrypt 2¹⁷ · 256 MiB, 4 iters each.
-    ///
-    /// Equivalent cost to `Paranoid`/`ParanoidX86` on x86-64.
+    /// Production on macOS (Apple Silicon).  ~1 GiB · scrypt 2¹⁸ · ~512 MiB, 4 iters each.
     BalancedMac,
-    /// Maximum security on macOS.  1 GiB · scrypt 2¹⁸ · 512 MiB, 4 iters each.
+    /// Maximum security on macOS.  ~3 GiB · scrypt 2²⁰ · ~1 GiB, 4 iters each.
+    /// Assumes 8+ GiB unified memory (all M-series chips).
     ParanoidMac,
 
     // ── x86-64 ───────────────────────────────────────────────────────────────
@@ -330,11 +608,11 @@ pub enum KdfPreset {
 
     // ── Linux ARM64 ──────────────────────────────────────────────────────────
 
-    /// Dev / CI on Linux ARM64.  Same params as `Fast`.
+    /// Dev / CI on Linux ARM64.  ~256 MiB · scrypt 2¹⁶ · ~128 MiB, 3 iters each.
     FastArm,
-    /// Production on Linux ARM64.  256 MiB · scrypt 2¹⁶ · 128 MiB, 3 iters each.
+    /// Production on Linux ARM64.  ~512 MiB · scrypt 2¹⁷ · ~256 MiB, 5 iters each.
     BalancedArm,
-    /// Maximum security on Linux ARM64.  512 MiB · scrypt 2¹⁷ · 256 MiB, 5 iters each.
+    /// Maximum security on Linux ARM64.  ~768 MiB · scrypt 2¹⁸ · ~512 MiB, 5 iters each.
     ParanoidArm,
 
     // ── custom ────────────────────────────────────────────────────────────────
@@ -362,54 +640,60 @@ pub enum KdfPreset {
 impl KdfPreset {
     /// Return the [`KdfParams`] for this preset.
     pub fn params(self) -> KdfParams {
-        // Shared parameter blocks used by multiple variants.
+        // Fast = ~128 MiB · scrypt 2¹⁶ · ~64 MiB
         let fast = KdfParams {
-            pass1: Argon2PassParams { m_cost:   65_536, t_cost: 2, p_cost: 1 },
-            pass2: ScryptPassParams { log_n: 14, r: 8, p: 1 },
-            pass3: Argon2PassParams { m_cost:   32_768, t_cost: 2, p_cost: 1 },
-        };
-        let balanced = KdfParams {
             pass1: Argon2PassParams { m_cost:  131_072, t_cost: 3, p_cost: 1 },
             pass2: ScryptPassParams { log_n: 16, r: 8, p: 1 },
             pass3: Argon2PassParams { m_cost:   65_536, t_cost: 3, p_cost: 1 },
         };
-        let paranoid = KdfParams {
+        // Balanced = ~512 MiB · scrypt 2¹⁷ · ~256 MiB
+        let balanced = KdfParams {
             pass1: Argon2PassParams { m_cost:  524_288, t_cost: 4, p_cost: 1 },
             pass2: ScryptPassParams { log_n: 17, r: 8, p: 1 },
             pass3: Argon2PassParams { m_cost:  262_144, t_cost: 4, p_cost: 1 },
         };
+        // Paranoid = ~768 MiB · scrypt 2¹⁸ · ~512 MiB
+        let paranoid = KdfParams {
+            pass1: Argon2PassParams { m_cost:  786_432, t_cost: 5, p_cost: 1 },
+            pass2: ScryptPassParams { log_n: 18, r: 8, p: 1 },
+            pass3: Argon2PassParams { m_cost:  524_288, t_cost: 5, p_cost: 1 },
+        };
 
         match self {
-            // Generic
-            KdfPreset::Fast                                      => fast,
-            KdfPreset::Balanced                                  => balanced,
-            KdfPreset::Paranoid                                  => paranoid,
-            // Mac — same Fast params, harder for Balanced/Paranoid
-            KdfPreset::FastMac                                   => fast,
-            KdfPreset::BalancedMac                               => paranoid,
-            KdfPreset::ParanoidMac => KdfParams {
-                pass1: Argon2PassParams { m_cost: 1_048_576, t_cost: 4, p_cost: 1 },
+            // Generic / x86-64 (identical params, named for code clarity)
+            KdfPreset::Fast    | KdfPreset::FastX86    => fast,
+            KdfPreset::Balanced | KdfPreset::BalancedX86 => balanced,
+            KdfPreset::Paranoid | KdfPreset::ParanoidX86 => paranoid,
+            // Apple Silicon — calibrated for M-series memory bandwidth
+            KdfPreset::FastMac    => balanced, // ~512 MiB
+            KdfPreset::BalancedMac => KdfParams {
+                pass1: Argon2PassParams { m_cost: 1_048_576, t_cost: 4, p_cost: 1 }, // 1 GiB
                 pass2: ScryptPassParams { log_n: 18, r: 8, p: 1 },
                 pass3: Argon2PassParams { m_cost:   524_288, t_cost: 4, p_cost: 1 },
             },
-            // x86-64 — identical to generic; named for code clarity
-            KdfPreset::FastX86                                   => fast,
-            KdfPreset::BalancedX86                               => balanced,
-            KdfPreset::ParanoidX86                               => paranoid,
+            KdfPreset::ParanoidMac => KdfParams {
+                pass1: Argon2PassParams { m_cost: 3_145_728, t_cost: 4, p_cost: 1 }, // 3 GiB
+                pass2: ScryptPassParams { log_n: 20, r: 8, p: 1 },
+                pass3: Argon2PassParams { m_cost: 1_048_576, t_cost: 4, p_cost: 1 }, // 1 GiB
+            },
             // Linux ARM64
-            KdfPreset::FastArm                                   => fast,
-            KdfPreset::BalancedArm => KdfParams {
-                pass1: Argon2PassParams { m_cost:  262_144, t_cost: 3, p_cost: 1 },
+            KdfPreset::FastArm => KdfParams {
+                pass1: Argon2PassParams { m_cost:  262_144, t_cost: 3, p_cost: 1 }, // 256 MiB
                 pass2: ScryptPassParams { log_n: 16, r: 8, p: 1 },
                 pass3: Argon2PassParams { m_cost:  131_072, t_cost: 3, p_cost: 1 },
             },
-            KdfPreset::ParanoidArm => KdfParams {
-                pass1: Argon2PassParams { m_cost:  524_288, t_cost: 5, p_cost: 1 },
+            KdfPreset::BalancedArm => KdfParams {
+                pass1: Argon2PassParams { m_cost:  524_288, t_cost: 5, p_cost: 1 }, // 512 MiB
                 pass2: ScryptPassParams { log_n: 17, r: 8, p: 1 },
                 pass3: Argon2PassParams { m_cost:  262_144, t_cost: 5, p_cost: 1 },
             },
+            KdfPreset::ParanoidArm => KdfParams {
+                pass1: Argon2PassParams { m_cost:  786_432, t_cost: 5, p_cost: 1 }, // 768 MiB
+                pass2: ScryptPassParams { log_n: 18, r: 8, p: 1 },
+                pass3: Argon2PassParams { m_cost:  524_288, t_cost: 5, p_cost: 1 },
+            },
             // Custom
-            KdfPreset::Custom(p)                                 => p,
+            KdfPreset::Custom(p) => p,
         }
     }
 }
@@ -536,6 +820,9 @@ pub enum TimeLockError {
     /// The async task panicked inside `spawn_blocking`.
     #[cfg(any(feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
     TaskPanic(String),
+    /// The caller passed `Some(time)` but `enc-timelock-keygen-input` is not
+    /// active, or passed `None` but `enc-timelock-keygen-now` is not active.
+    ForbiddenAction(&'static str),
 }
 
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
@@ -550,6 +837,7 @@ impl std::fmt::Display for TimeLockError {
             Self::InvalidTime(s)    => write!(f, "invalid time input: {s}"),
             #[cfg(any(feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
             Self::TaskPanic(s)      => write!(f, "KDF task panicked: {s}"),
+            Self::ForbiddenAction(s) => write!(f, "action not permitted: {s}"),
         }
     }
 }
@@ -557,7 +845,7 @@ impl std::fmt::Display for TimeLockError {
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 impl std::error::Error for TimeLockError {}
 
-// ─── public sync API ──────────────────────────────────────────────────────────
+// ─── internal sync API ───────────────────────────────────────────────────────
 
 /// Derive a 32-byte key from the **current system time** (decryption path).
 ///
@@ -575,18 +863,21 @@ impl std::error::Error for TimeLockError {}
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```ignore
 /// # use toolkit_zero::encryption::timelock::*;
 /// let salts = TimeLockSalts::generate();
-/// let key = derive_key_now(
+/// let key = timelock(
+///     TimeLockCadence::None,
+///     None,
 ///     TimePrecision::Minute,
 ///     TimeFormat::Hour24,
 ///     &salts,
 ///     &KdfPreset::Balanced.params(),
 /// ).unwrap();
 /// ```
+#[allow(dead_code)]
 #[cfg(feature = "enc-timelock-keygen-now")]
-pub fn derive_key_now(
+fn derive_key_now(
     precision: TimePrecision,
     format:    TimeFormat,
     salts:     &TimeLockSalts,
@@ -610,20 +901,22 @@ pub fn derive_key_now(
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```ignore
 /// # use toolkit_zero::encryption::timelock::*;
 /// let salts = TimeLockSalts::generate();
 /// let at = TimeLockTime::new(14, 37).unwrap();
-/// let key = derive_key_at(
-///     at,
+/// let key = timelock(
+///     TimeLockCadence::None,
+///     Some(at),
 ///     TimePrecision::Minute,
 ///     TimeFormat::Hour24,
 ///     &salts,
 ///     &KdfPreset::Balanced.params(),
 /// ).unwrap();
 /// ```
+#[allow(dead_code)]
 #[cfg(feature = "enc-timelock-keygen-input")]
-pub fn derive_key_at(
+fn derive_key_at(
     time:      TimeLockTime,
     precision: TimePrecision,
     format:    TimeFormat,
@@ -634,7 +927,7 @@ pub fn derive_key_at(
     helper::run_kdf_chain(time_str.into_bytes(), salts, params)
 }
 
-// ─── public async API (enc-timelock-async) ────────────────────────────────────
+// ─── internal async API ──────────────────────────────────────────────────────
 
 /// Async variant of [`derive_key_now`].
 ///
@@ -650,8 +943,9 @@ pub fn derive_key_at(
 ///
 /// Returns [`TimeLockError`] if the system clock is unavailable, any KDF
 /// pass fails, or the spawned task panics.
+#[allow(dead_code)]
 #[cfg(feature = "enc-timelock-async-keygen-now")]
-pub async fn derive_key_now_async(
+async fn derive_key_now_async(
     precision: TimePrecision,
     format:    TimeFormat,
     salts:     TimeLockSalts,
@@ -668,8 +962,9 @@ pub async fn derive_key_now_async(
 /// Takes `salts` and `params` by **value**; both are zeroized on drop.
 ///
 /// Requires the `enc-timelock-async-keygen-input` feature.
+#[allow(dead_code)]
 #[cfg(feature = "enc-timelock-async-keygen-input")]
-pub async fn derive_key_at_async(
+async fn derive_key_at_async(
     time:      TimeLockTime,
     precision: TimePrecision,
     format:    TimeFormat,
@@ -681,6 +976,282 @@ pub async fn derive_key_at_async(
         .map_err(|e| TimeLockError::TaskPanic(e.to_string()))?
 }
 
+// ─── internal scheduled sync API ─────────────────────────────────────────────
+
+/// Derive a 32-byte key from a [`TimeLockCadence`] anchor plus an **explicit
+/// [`TimeLockTime`]** (encryption path).
+///
+/// Extends [`derive_key_at`] with a calendar constraint.  The KDF input
+/// is `"<cadence_prefix><time_string>"`.  For [`TimeLockCadence::None`] the
+/// prefix is empty, producing a result identical to [`derive_key_at`].
+///
+/// Store [`pack`]ed settings alongside the salts in the ciphertext header so
+/// the decryption side can reconstruct the correct KDF input via
+/// [`derive_key_scheduled_now`].
+///
+/// # Panics
+///
+/// Panics if `cadence` is [`TimeLockCadence::DayOfMonthInMonth`] with a day
+/// that exceeds the month's maximum (e.g. day 29 for February).
+///
+/// # Errors
+///
+/// Returns [`TimeLockError`] if the time value is out of range or any KDF
+/// pass fails.
+///
+/// # Example
+///
+/// ```no_run
+/// # use toolkit_zero::encryption::timelock::*;
+/// let salts = TimeLockSalts::generate();
+/// let t     = TimeLockTime::new(18, 0).unwrap();
+/// // Use the public timelock() entry point:
+/// let key = timelock(
+///     TimeLockCadence::DayOfWeek(Weekday::Tuesday),
+///     Some(t),
+///     TimePrecision::Hour,
+///     TimeFormat::Hour24,
+///     &salts,
+///     &KdfPreset::Balanced.params(),
+/// ).unwrap();
+/// // key is valid only at 18:xx on any Tuesday
+/// ```
+#[cfg(feature = "enc-timelock-keygen-input")]
+fn derive_key_scheduled_at(
+    cadence:   TimeLockCadence,
+    time:      TimeLockTime,
+    precision: TimePrecision,
+    format:    TimeFormat,
+    salts:     &TimeLockSalts,
+    params:    &KdfParams,
+) -> Result<TimeLockKey, TimeLockError> {
+    let cadence_part = cadence.bake_string();
+    let time_part    = helper::format_time_at(time, precision, format)?;
+    let full         = format!("{}{}", cadence_part, time_part);
+    helper::run_kdf_chain(full.into_bytes(), salts, params)
+}
+
+/// Derive a 32-byte key from the **current system time and calendar state**
+/// using the settings stored in a [`TimeLockParams`] (decryption path).
+///
+/// Extends [`derive_key_now`] with calendar awareness.  The `cadence_variant`
+/// field in `timelock_params` determines which calendar dimension(s) are read
+/// from the live clock, making the KDF input identical to what
+/// [`derive_key_scheduled_at`] produced on the matching slot.
+///
+/// # Errors
+///
+/// Returns [`TimeLockError`] if the system clock is unavailable or any KDF
+/// pass fails.
+///
+/// # Example
+///
+/// ```ignore
+/// # use toolkit_zero::encryption::timelock::*;
+/// // Call at 18:xx on a Tuesday — reproduces the key from derive_key_scheduled_at
+/// let salts  = TimeLockSalts::from_bytes([0u8;32],[0u8;32],[0u8;32]);
+/// let key    = timelock(
+///     TimeLockCadence::DayOfWeek(Weekday::Tuesday),
+///     None,
+///     TimePrecision::Hour,
+///     TimeFormat::Hour24,
+///     &salts,
+///     &KdfPreset::Balanced.params(),
+/// ).unwrap();
+/// ```
+#[cfg(feature = "enc-timelock-keygen-now")]
+fn derive_key_scheduled_now(
+    timelock_params: &TimeLockParams,
+    salts:           &TimeLockSalts,
+    params:          &KdfParams,
+) -> Result<TimeLockKey, TimeLockError> {
+    let (precision, format, cadence_variant) = utility::unpack(timelock_params);
+    let cadence_part = helper::bake_cadence_now(cadence_variant)?;
+    let time_part    = helper::format_time_now(precision, format)?;
+    let full         = format!("{}{}", cadence_part, time_part);
+    helper::run_kdf_chain(full.into_bytes(), salts, params)
+}
+
+// ─── internal scheduled async API ───────────────────────────────────────────
+
+/// Async variant of [`derive_key_scheduled_at`].
+///
+/// Offloads the blocking KDF work to a Tokio blocking thread.  Takes `salts`
+/// and `params` by **value** (required for `'static` move into
+/// `spawn_blocking`); both are zeroized on drop.  `cadence` and `time` are
+/// `Copy`.
+///
+/// Requires the `enc-timelock-async-keygen-input` feature.
+#[cfg(feature = "enc-timelock-async-keygen-input")]
+async fn derive_key_scheduled_at_async(
+    cadence:   TimeLockCadence,
+    time:      TimeLockTime,
+    precision: TimePrecision,
+    format:    TimeFormat,
+    salts:     TimeLockSalts,
+    params:    KdfParams,
+) -> Result<TimeLockKey, TimeLockError> {
+    tokio::task::spawn_blocking(move || {
+        derive_key_scheduled_at(cadence, time, precision, format, &salts, &params)
+    })
+    .await
+    .map_err(|e| TimeLockError::TaskPanic(e.to_string()))?
+}
+
+/// Async variant of [`derive_key_scheduled_now`].
+///
+/// Offloads the blocking KDF work to a Tokio blocking thread.  Takes all
+/// arguments by **value**; [`TimeLockParams`] is `Copy`, `salts` and `params`
+/// are zeroized on drop.
+///
+/// Requires the `enc-timelock-async-keygen-now` feature.
+#[cfg(feature = "enc-timelock-async-keygen-now")]
+async fn derive_key_scheduled_now_async(
+    timelock_params: TimeLockParams,
+    salts:           TimeLockSalts,
+    params:          KdfParams,
+) -> Result<TimeLockKey, TimeLockError> {
+    tokio::task::spawn_blocking(move || {
+        derive_key_scheduled_now(&timelock_params, &salts, &params)
+    })
+    .await
+    .map_err(|e| TimeLockError::TaskPanic(e.to_string()))?
+}
+
+// ─── public API ───────────────────────────────────────────────────────────────
+
+/// Derive a 32-byte time-locked key — unified sync entry point.
+///
+/// Pass `time: Some(t)` on the **encryption side** to lock to an explicit
+/// time and optional cadence.  Pass `time: None` on the **decryption side**
+/// to derive from the current system clock and calendar state.
+///
+/// The `cadence`, `precision`, `format`, and `salts` must match between the
+/// encryption and decryption calls.  [`pack`] the settings into a
+/// [`TimeLockParams`] and store them alongside the salts in the ciphertext
+/// header so the decryption side can reconstruct them.
+///
+/// # Errors
+///
+/// - [`TimeLockError::ForbiddenAction`] if `Some(time)` is passed but the
+///   `enc-timelock-keygen-input` feature is not active, or `None` is passed
+///   but `enc-timelock-keygen-now` is not active.
+/// - [`TimeLockError::Argon2`] / [`TimeLockError::Scrypt`] on KDF failure.
+/// - [`TimeLockError::ClockUnavailable`] if the OS clock is unusable (`None` path).
+///
+/// # Example
+///
+/// ```no_run
+/// # use toolkit_zero::encryption::timelock::*;
+/// let salts = TimeLockSalts::generate();
+///
+/// // Encryption side — lock to every Tuesday at 18:00
+/// let enc_key = timelock(
+///     TimeLockCadence::DayOfWeek(Weekday::Tuesday),
+///     Some(TimeLockTime::new(18, 0).unwrap()),
+///     TimePrecision::Hour,
+///     TimeFormat::Hour24,
+///     &salts,
+///     &KdfPreset::BalancedMac.params(),
+/// ).unwrap();
+///
+/// // Store pack(...) result + salts in ciphertext header.
+/// // Decryption side — call on a Tuesday at 18:xx:
+/// let stored = pack(
+///     TimePrecision::Hour, TimeFormat::Hour24,
+///     &TimeLockCadence::DayOfWeek(Weekday::Tuesday),
+/// );
+/// let dec_key = timelock(
+///     TimeLockCadence::DayOfWeek(Weekday::Tuesday), // shape only; values read from clock
+///     None,
+///     TimePrecision::Hour,
+///     TimeFormat::Hour24,
+///     &salts,
+///     &KdfPreset::BalancedMac.params(),
+/// ).unwrap();
+/// // enc_key.as_bytes() == dec_key.as_bytes() when called at the right time
+/// ```
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input"))]
+pub fn timelock(
+    cadence:   TimeLockCadence,
+    time:      Option<TimeLockTime>,
+    precision: TimePrecision,
+    format:    TimeFormat,
+    salts:     &TimeLockSalts,
+    params:    &KdfParams,
+) -> Result<TimeLockKey, TimeLockError> {
+    match time {
+        Some(t) => {
+            #[cfg(not(feature = "enc-timelock-keygen-input"))]
+            return Err(TimeLockError::ForbiddenAction(
+                "enc-timelock-keygen-input feature is required to pass an explicit time; \
+                 use None to derive from the current clock (requires enc-timelock-keygen-now)"
+            ));
+            #[cfg(feature = "enc-timelock-keygen-input")]
+            return derive_key_scheduled_at(cadence, t, precision, format, salts, params);
+        }
+        None => {
+            #[cfg(not(feature = "enc-timelock-keygen-now"))]
+            return Err(TimeLockError::ForbiddenAction(
+                "enc-timelock-keygen-now feature is required to derive from the current clock; \
+                 pass Some(time) to supply an explicit time (requires enc-timelock-keygen-input)"
+            ));
+            #[cfg(feature = "enc-timelock-keygen-now")]
+            return derive_key_scheduled_now(
+                &utility::pack(precision, format, &cadence),
+                salts,
+                params,
+            );
+        }
+    }
+}
+
+/// Derive a 32-byte time-locked key — unified async entry point.
+///
+/// Async counterpart of [`timelock`].  Offloads the blocking KDF work to a
+/// Tokio blocking thread.  Takes `salts` and `params` by **value** (required
+/// for `'static` move into `spawn_blocking`); both are zeroized on drop.
+/// `cadence`, `time`, `precision`, and `format` are all `Copy`.
+///
+/// # Errors
+///
+/// Same as [`timelock`], plus [`TimeLockError::TaskPanic`] if the spawned
+/// task panics.
+#[cfg(any(feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+pub async fn timelock_async(
+    cadence:   TimeLockCadence,
+    time:      Option<TimeLockTime>,
+    precision: TimePrecision,
+    format:    TimeFormat,
+    salts:     TimeLockSalts,
+    params:    KdfParams,
+) -> Result<TimeLockKey, TimeLockError> {
+    match time {
+        Some(t) => {
+            #[cfg(not(feature = "enc-timelock-async-keygen-input"))]
+            return Err(TimeLockError::ForbiddenAction(
+                "enc-timelock-async-keygen-input feature is required to pass an explicit time"
+            ));
+            #[cfg(feature = "enc-timelock-async-keygen-input")]
+            return derive_key_scheduled_at_async(
+                cadence, t, precision, format, salts, params,
+            ).await;
+        }
+        None => {
+            #[cfg(not(feature = "enc-timelock-async-keygen-now"))]
+            return Err(TimeLockError::ForbiddenAction(
+                "enc-timelock-async-keygen-now feature is required to derive from the current clock"
+            ));
+            #[cfg(feature = "enc-timelock-async-keygen-now")]
+            return derive_key_scheduled_now_async(
+                utility::pack(precision, format, &cadence),
+                salts,
+                params,
+            ).await;
+        }
+    }
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input"))]
@@ -690,7 +1261,14 @@ mod tests {
     #[cfg(all(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input"))]
     use chrono::Timelike as _;
 
-    fn fast()  -> KdfParams       { KdfPreset::Fast.params() }
+    fn fast() -> KdfParams {
+        // Minimal params for fast test execution — not a real security preset.
+        KdfParams {
+            pass1: Argon2PassParams { m_cost: 32_768, t_cost: 1, p_cost: 1 },
+            pass2: ScryptPassParams { log_n: 13, r: 8, p: 1 },
+            pass3: Argon2PassParams { m_cost: 16_384, t_cost: 1, p_cost: 1 },
+        }
+    }
     fn salts() -> TimeLockSalts   { TimeLockSalts::generate() }
 
     // ── TimeLockTime construction ─────────────────────────────────────────
@@ -926,5 +1504,106 @@ mod tests {
         derive_key_at(t, TimePrecision::Hour, TimeFormat::Hour24, &salts(), &KdfPreset::ParanoidArm.params())
             .expect("ParanoidArm should succeed");
         println!("ParanoidArm: {:?}", start.elapsed());
+    }
+
+    // ── Scheduled key derivation ─────────────────────────────────────────────
+
+    #[cfg(feature = "enc-timelock-keygen-input")]
+    #[test]
+    fn scheduled_none_same_as_regular_at() {
+        // cadence=None adds no prefix — result must equal derive_key_at
+        let s = salts();
+        let t = TimeLockTime::new(14, 0).unwrap();
+        let regular   = derive_key_at(t, TimePrecision::Hour, TimeFormat::Hour24, &s, &fast()).unwrap();
+        let scheduled = derive_key_scheduled_at(
+            TimeLockCadence::None, t, TimePrecision::Hour, TimeFormat::Hour24, &s, &fast(),
+        ).unwrap();
+        assert_eq!(regular.as_bytes(), scheduled.as_bytes());
+    }
+
+    #[cfg(feature = "enc-timelock-keygen-input")]
+    #[test]
+    fn scheduled_different_weekdays_different_keys() {
+        let s = salts();
+        let t = TimeLockTime::new(18, 0).unwrap();
+        let k_mon = derive_key_scheduled_at(
+            TimeLockCadence::DayOfWeek(Weekday::Monday),
+            t, TimePrecision::Hour, TimeFormat::Hour24, &s, &fast(),
+        ).unwrap();
+        let k_tue = derive_key_scheduled_at(
+            TimeLockCadence::DayOfWeek(Weekday::Tuesday),
+            t, TimePrecision::Hour, TimeFormat::Hour24, &s, &fast(),
+        ).unwrap();
+        assert_ne!(k_mon.as_bytes(), k_tue.as_bytes());
+    }
+
+    #[cfg(feature = "enc-timelock-keygen-input")]
+    #[test]
+    fn scheduled_different_months_different_keys() {
+        let s = salts();
+        let t = TimeLockTime::new(0, 0).unwrap();
+        let k_jan = derive_key_scheduled_at(
+            TimeLockCadence::MonthOfYear(Month::January),
+            t, TimePrecision::Hour, TimeFormat::Hour24, &s, &fast(),
+        ).unwrap();
+        let k_feb = derive_key_scheduled_at(
+            TimeLockCadence::MonthOfYear(Month::February),
+            t, TimePrecision::Hour, TimeFormat::Hour24, &s, &fast(),
+        ).unwrap();
+        assert_ne!(k_jan.as_bytes(), k_feb.as_bytes());
+    }
+
+    #[cfg(feature = "enc-timelock-keygen-input")]
+    #[test]
+    fn scheduled_at_deterministic() {
+        // Same inputs must always produce the same key
+        let s  = salts();
+        let t  = TimeLockTime::new(6, 0).unwrap();
+        let c  = TimeLockCadence::DayOfWeekInMonth(Weekday::Friday, Month::March);
+        let k1 = derive_key_scheduled_at(c, t, TimePrecision::Hour, TimeFormat::Hour24, &s, &fast()).unwrap();
+        let s2 = TimeLockSalts::from_slice(&s.to_bytes());
+        let k2 = derive_key_scheduled_at(c, t, TimePrecision::Hour, TimeFormat::Hour24, &s2, &fast()).unwrap();
+        assert_eq!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[cfg(feature = "enc-timelock-keygen-now")]
+    #[test]
+    fn scheduled_now_none_matches_derive_now() {
+        // cadence_variant=0 (None) + Hour + Hour24 must match derive_key_now exactly
+        let s      = salts();
+        let stored = TimeLockParams { time_precision: 0, time_format: 1, cadence_variant: 0 };
+        let k1 = derive_key_now(TimePrecision::Hour, TimeFormat::Hour24, &s, &fast()).unwrap();
+        let k2 = derive_key_scheduled_now(&stored, &s, &fast()).unwrap();
+        assert_eq!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[cfg(any(feature = "enc-timelock-keygen-input", feature = "enc-timelock-keygen-now"))]
+    #[test]
+    fn pack_unpack_roundtrip() {
+        let params = pack(
+            TimePrecision::Minute,
+            TimeFormat::Hour24,
+            &TimeLockCadence::DayOfWeekInMonth(Weekday::Tuesday, Month::February),
+        );
+        assert_eq!(params.time_precision, 2);  // Minute
+        assert_eq!(params.time_format, 1);      // Hour24
+        assert_eq!(params.cadence_variant, 4);  // DayOfWeekInMonth
+        let (p, f, v) = unpack(&params);
+        assert!(matches!(p, TimePrecision::Minute));
+        assert!(matches!(f, TimeFormat::Hour24));
+        assert_eq!(v, 4);
+    }
+
+    #[cfg(feature = "enc-timelock-keygen-input")]
+    #[test]
+    #[should_panic(expected = "DayOfMonthInMonth")]
+    fn day_of_month_in_month_panics_on_invalid_day() {
+        // February can have at most 28 days; day 29 must panic
+        let s = salts();
+        let t = TimeLockTime::new(0, 0).unwrap();
+        let _ = derive_key_scheduled_at(
+            TimeLockCadence::DayOfMonthInMonth(29, Month::February),
+            t, TimePrecision::Hour, TimeFormat::Hour24, &s, &fast(),
+        );
     }
 }
