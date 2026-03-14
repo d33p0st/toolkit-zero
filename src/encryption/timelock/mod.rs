@@ -16,16 +16,15 @@
 //!
 //! # Two entry points
 //!
-//! | Function | Time source | Intended use |
-//! |----------|-------------|--------------|
-//! | [`derive_key_now`]  | OS wall clock (`now()`) | **Decryption** — no user input; always uses current time |
-//! | [`derive_key_at`]   | Caller-supplied [`TimeLockTime`] | **Encryption** — user chooses the lock time |
+//! | `params` argument                   | Path              | Intended use                                                |
+//! |-------------------------------------|-------------------|-------------------------------------------------------------|
+//! | `params: None` (+ all other `Some`) | `_at` encryption  | Caller supplies cadence, time, precision, format, salts, KDF |
+//! | `params: Some(p)` (rest `None`)     | `_now` decryption | All settings read from [`TimeLockParams`]; no user input    |
 //!
-//! Async counterparts ([`derive_key_now_async`] / [`derive_key_at_async`],
-//! available with the `enc-timelock-async-keygen-now` /
-//! `enc-timelock-async-keygen-input` features respectively) offload the
-//! blocking KDF work to a dedicated thread so the calling future's executor
-//! is never stalled.
+//! Async counterparts ([`timelock_async`]) are available with the
+//! `enc-timelock-async-keygen-now` / `enc-timelock-async-keygen-input` features
+//! and offload the blocking KDF work to a dedicated thread so the calling
+//! future's executor is never stalled.
 //!
 //! # Time input
 //!
@@ -67,34 +66,34 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use toolkit_zero::encryption::timelock::{
-//!     timelock, TimeLockCadence,
-//!     KdfPreset, TimeLockSalts, TimeLockTime,
-//!     TimePrecision, TimeFormat,
-//! };
+//! use toolkit_zero::encryption::timelock::*;
 //!
 //! // ── Encryption side ───────────────────────────────────────────────────
-//! let salts     = TimeLockSalts::generate();  // store in ciphertext header
-//! let lock_time = TimeLockTime::new(14, 37).unwrap(); // 14:37 local time
+//! let salts     = TimeLockSalts::generate();
+//! let kdf       = KdfPreset::Balanced.params();
+//! let lock_time = TimeLockTime::new(14, 37).unwrap();
+//!
+//! // Derive the encryption key (params = None → _at path).
 //! let enc_key = timelock(
-//!     TimeLockCadence::None,
+//!     Some(TimeLockCadence::None),
 //!     Some(lock_time),
-//!     TimePrecision::Minute,
-//!     TimeFormat::Hour24,
-//!     &salts,
-//!     &KdfPreset::Balanced.params(),
+//!     Some(TimePrecision::Minute),
+//!     Some(TimeFormat::Hour24),
+//!     Some(salts.clone()),
+//!     Some(kdf),
+//!     None,
 //! ).unwrap();
-//! // use enc_key.as_bytes() with your cipher …
+//!
+//! // Pack all settings into a header and store alongside the ciphertext.
+//! let header = pack(TimePrecision::Minute, TimeFormat::Hour24,
+//!                   &TimeLockCadence::None, salts, kdf);
 //!
 //! // ── Decryption side ───────────────────────────────────────────────────
-//! // Load salts + precision/format from header; call at 14:37 local time.
+//! // Load header from ciphertext (params = Some → _now path).
+//! // Call at 14:37 local time:
 //! let dec_key = timelock(
-//!     TimeLockCadence::None,
-//!     None,
-//!     TimePrecision::Minute,
-//!     TimeFormat::Hour24,
-//!     &salts,
-//!     &KdfPreset::Balanced.params(),
+//!     None, None, None, None, None, None,
+//!     Some(header),
 //! ).unwrap();
 //! // enc_key.as_bytes() == dec_key.as_bytes() when called at 14:37 local time
 //! ```
@@ -709,6 +708,7 @@ impl KdfPreset {
 /// Salts are **not secret** — they only prevent precomputation attacks.
 /// All three fields are zeroized when this value is dropped.
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+#[derive(Debug, Clone)]
 pub struct TimeLockSalts {
     /// Salt for the first Argon2id pass.
     pub s1: [u8; 32],
@@ -1001,18 +1001,20 @@ async fn derive_key_at_async(
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```ignore
 /// # use toolkit_zero::encryption::timelock::*;
 /// let salts = TimeLockSalts::generate();
+/// let kdf   = KdfPreset::Balanced.params();
 /// let t     = TimeLockTime::new(18, 0).unwrap();
-/// // Use the public timelock() entry point:
+/// // Use the public timelock() entry point (params = None → _at path):
 /// let key = timelock(
-///     TimeLockCadence::DayOfWeek(Weekday::Tuesday),
+///     Some(TimeLockCadence::DayOfWeek(Weekday::Tuesday)),
 ///     Some(t),
-///     TimePrecision::Hour,
-///     TimeFormat::Hour24,
-///     &salts,
-///     &KdfPreset::Balanced.params(),
+///     Some(TimePrecision::Hour),
+///     Some(TimeFormat::Hour24),
+///     Some(salts),
+///     Some(kdf),
+///     None,
 /// ).unwrap();
 /// // key is valid only at 18:xx on any Tuesday
 /// ```
@@ -1048,28 +1050,21 @@ fn derive_key_scheduled_at(
 ///
 /// ```ignore
 /// # use toolkit_zero::encryption::timelock::*;
-/// // Call at 18:xx on a Tuesday — reproduces the key from derive_key_scheduled_at
-/// let salts  = TimeLockSalts::from_bytes([0u8;32],[0u8;32],[0u8;32]);
-/// let key    = timelock(
-///     TimeLockCadence::DayOfWeek(Weekday::Tuesday),
-///     None,
-///     TimePrecision::Hour,
-///     TimeFormat::Hour24,
-///     &salts,
-///     &KdfPreset::Balanced.params(),
+/// // Load header from ciphertext then call with params = Some(header):
+/// let dec_key = timelock(
+///     None, None, None, None, None, None,
+///     Some(header),  // header: TimeLockParams loaded from ciphertext
 /// ).unwrap();
 /// ```
 #[cfg(feature = "enc-timelock-keygen-now")]
 fn derive_key_scheduled_now(
     timelock_params: &TimeLockParams,
-    salts:           &TimeLockSalts,
-    params:          &KdfParams,
 ) -> Result<TimeLockKey, TimeLockError> {
     let (precision, format, cadence_variant) = utility::unpack(timelock_params);
     let cadence_part = helper::bake_cadence_now(cadence_variant)?;
     let time_part    = helper::format_time_now(precision, format)?;
     let full         = format!("{}{}", cadence_part, time_part);
-    helper::run_kdf_chain(full.into_bytes(), salts, params)
+    helper::run_kdf_chain(full.into_bytes(), &timelock_params.salts, &timelock_params.kdf_params)
 }
 
 // ─── internal scheduled async API ───────────────────────────────────────────
@@ -1100,19 +1095,17 @@ async fn derive_key_scheduled_at_async(
 
 /// Async variant of [`derive_key_scheduled_now`].
 ///
-/// Offloads the blocking KDF work to a Tokio blocking thread.  Takes all
-/// arguments by **value**; [`TimeLockParams`] is `Copy`, `salts` and `params`
-/// are zeroized on drop.
+/// Offloads the blocking KDF work to a Tokio blocking thread.  Takes
+/// `timelock_params` by **value**; the [`TimeLockSalts`] inside are
+/// zeroized on drop.
 ///
 /// Requires the `enc-timelock-async-keygen-now` feature.
 #[cfg(feature = "enc-timelock-async-keygen-now")]
 async fn derive_key_scheduled_now_async(
     timelock_params: TimeLockParams,
-    salts:           TimeLockSalts,
-    params:          KdfParams,
 ) -> Result<TimeLockKey, TimeLockError> {
     tokio::task::spawn_blocking(move || {
-        derive_key_scheduled_now(&timelock_params, &salts, &params)
+        derive_key_scheduled_now(&timelock_params)
     })
     .await
     .map_err(|e| TimeLockError::TaskPanic(e.to_string()))?
@@ -1122,96 +1115,101 @@ async fn derive_key_scheduled_now_async(
 
 /// Derive a 32-byte time-locked key — unified sync entry point.
 ///
-/// Pass `time: Some(t)` on the **encryption side** to lock to an explicit
-/// time and optional cadence.  Pass `time: None` on the **decryption side**
-/// to derive from the current system clock and calendar state.
+/// ## Encryption path (`params = None`)
 ///
-/// The `cadence`, `precision`, `format`, and `salts` must match between the
-/// encryption and decryption calls.  [`pack`] the settings into a
-/// [`TimeLockParams`] and store them alongside the salts in the ciphertext
-/// header so the decryption side can reconstruct them.
+/// Set `params` to `None` and supply all of `cadence`, `time`, `precision`,
+/// `format`, `salts`, and `kdf` as `Some(...)`.  Requires the
+/// `enc-timelock-keygen-input` feature.  After calling, use [`pack`] with the
+/// same arguments to produce a [`TimeLockParams`] header for the ciphertext.
+///
+/// ## Decryption path (`params = Some(p)`)
+///
+/// Set `params` to `Some(header)` where `header` is the [`TimeLockParams`]
+/// read from the ciphertext.  All other arguments are ignored and may be
+/// `None`.  Requires the `enc-timelock-keygen-now` feature.
 ///
 /// # Errors
 ///
-/// - [`TimeLockError::ForbiddenAction`] if `Some(time)` is passed but the
-///   `enc-timelock-keygen-input` feature is not active, or `None` is passed
-///   but `enc-timelock-keygen-now` is not active.
+/// - [`TimeLockError::ForbiddenAction`] if the required feature is not active,
+///   or if the `_at` path is taken but any required `Option` argument is `None`.
 /// - [`TimeLockError::Argon2`] / [`TimeLockError::Scrypt`] on KDF failure.
-/// - [`TimeLockError::ClockUnavailable`] if the OS clock is unusable (`None` path).
+/// - [`TimeLockError::ClockUnavailable`] if the OS clock is unusable (`_now` path).
 ///
 /// # Example
 ///
 /// ```no_run
 /// # use toolkit_zero::encryption::timelock::*;
 /// let salts = TimeLockSalts::generate();
+/// let kdf   = KdfPreset::BalancedMac.params();
 ///
 /// // Encryption side — lock to every Tuesday at 18:00
 /// let enc_key = timelock(
-///     TimeLockCadence::DayOfWeek(Weekday::Tuesday),
+///     Some(TimeLockCadence::DayOfWeek(Weekday::Tuesday)),
 ///     Some(TimeLockTime::new(18, 0).unwrap()),
-///     TimePrecision::Hour,
-///     TimeFormat::Hour24,
-///     &salts,
-///     &KdfPreset::BalancedMac.params(),
+///     Some(TimePrecision::Hour),
+///     Some(TimeFormat::Hour24),
+///     Some(salts.clone()),
+///     Some(kdf),
+///     None,
 /// ).unwrap();
 ///
-/// // Store pack(...) result + salts in ciphertext header.
+/// // Pack settings + salts + kdf into header; store in ciphertext.
+/// let header = pack(TimePrecision::Hour, TimeFormat::Hour24,
+///                   &TimeLockCadence::DayOfWeek(Weekday::Tuesday), salts, kdf);
+///
 /// // Decryption side — call on a Tuesday at 18:xx:
-/// let stored = pack(
-///     TimePrecision::Hour, TimeFormat::Hour24,
-///     &TimeLockCadence::DayOfWeek(Weekday::Tuesday),
-/// );
 /// let dec_key = timelock(
-///     TimeLockCadence::DayOfWeek(Weekday::Tuesday), // shape only; values read from clock
-///     None,
-///     TimePrecision::Hour,
-///     TimeFormat::Hour24,
-///     &salts,
-///     &KdfPreset::BalancedMac.params(),
+///     None, None, None, None, None, None,
+///     Some(header),
 /// ).unwrap();
 /// // enc_key.as_bytes() == dec_key.as_bytes() when called at the right time
 /// ```
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input"))]
 pub fn timelock(
-    cadence:   TimeLockCadence,
+    cadence:   Option<TimeLockCadence>,
     time:      Option<TimeLockTime>,
-    precision: TimePrecision,
-    format:    TimeFormat,
-    salts:     &TimeLockSalts,
-    params:    &KdfParams,
+    precision: Option<TimePrecision>,
+    format:    Option<TimeFormat>,
+    salts:     Option<TimeLockSalts>,
+    kdf:       Option<KdfParams>,
+    params:    Option<TimeLockParams>,
 ) -> Result<TimeLockKey, TimeLockError> {
-    match time {
-        Some(t) => {
-            #[cfg(not(feature = "enc-timelock-keygen-input"))]
-            return Err(TimeLockError::ForbiddenAction(
-                "enc-timelock-keygen-input feature is required to pass an explicit time; \
-                 use None to derive from the current clock (requires enc-timelock-keygen-now)"
-            ));
-            #[cfg(feature = "enc-timelock-keygen-input")]
-            return derive_key_scheduled_at(cadence, t, precision, format, salts, params);
-        }
-        None => {
-            #[cfg(not(feature = "enc-timelock-keygen-now"))]
-            return Err(TimeLockError::ForbiddenAction(
-                "enc-timelock-keygen-now feature is required to derive from the current clock; \
-                 pass Some(time) to supply an explicit time (requires enc-timelock-keygen-input)"
-            ));
-            #[cfg(feature = "enc-timelock-keygen-now")]
-            return derive_key_scheduled_now(
-                &utility::pack(precision, format, &cadence),
-                salts,
-                params,
-            );
+    if let Some(p) = params {
+        // _now (decryption) path: all settings come from TimeLockParams.
+        let _ = (cadence, time, precision, format, salts, kdf);  // unused on this path
+        #[cfg(not(feature = "enc-timelock-keygen-now"))]
+        return Err(TimeLockError::ForbiddenAction(
+            "enc-timelock-keygen-now feature is required for the _now (decryption) path"
+        ));
+        #[cfg(feature = "enc-timelock-keygen-now")]
+        return derive_key_scheduled_now(&p);
+    } else {
+        // _at (encryption) path: caller must supply all other arguments.
+        #[cfg(not(feature = "enc-timelock-keygen-input"))]
+        return Err(TimeLockError::ForbiddenAction(
+            "enc-timelock-keygen-input feature is required for the _at (encryption) path; \
+             pass Some(TimeLockParams) for the decryption path (requires enc-timelock-keygen-now)"
+        ));
+        #[cfg(feature = "enc-timelock-keygen-input")]
+        {
+            let c  = cadence.ok_or(TimeLockError::ForbiddenAction("_at path: cadence must be Some"))?;
+            let t  = time.ok_or(TimeLockError::ForbiddenAction("_at path: time must be Some"))?;
+            let pr = precision.ok_or(TimeLockError::ForbiddenAction("_at path: precision must be Some"))?;
+            let fm = format.ok_or(TimeLockError::ForbiddenAction("_at path: format must be Some"))?;
+            let sl = salts.ok_or(TimeLockError::ForbiddenAction("_at path: salts must be Some"))?;
+            let kd = kdf.ok_or(TimeLockError::ForbiddenAction("_at path: kdf must be Some"))?;
+            return derive_key_scheduled_at(c, t, pr, fm, &sl, &kd);
         }
     }
 }
 
 /// Derive a 32-byte time-locked key — unified async entry point.
 ///
-/// Async counterpart of [`timelock`].  Offloads the blocking KDF work to a
-/// Tokio blocking thread.  Takes `salts` and `params` by **value** (required
-/// for `'static` move into `spawn_blocking`); both are zeroized on drop.
-/// `cadence`, `time`, `precision`, and `format` are all `Copy`.
+/// Async counterpart of [`timelock`].  Same `params`-based routing: set
+/// `params = Some(header)` for the **decryption** path, or `params = None`
+/// with all other arguments as `Some(...)` for the **encryption** path.
+/// All arguments are taken by value; the blocking KDF work is offloaded to a
+/// Tokio blocking thread.
 ///
 /// # Errors
 ///
@@ -1219,35 +1217,36 @@ pub fn timelock(
 /// task panics.
 #[cfg(any(feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 pub async fn timelock_async(
-    cadence:   TimeLockCadence,
+    cadence:   Option<TimeLockCadence>,
     time:      Option<TimeLockTime>,
-    precision: TimePrecision,
-    format:    TimeFormat,
-    salts:     TimeLockSalts,
-    params:    KdfParams,
+    precision: Option<TimePrecision>,
+    format:    Option<TimeFormat>,
+    salts:     Option<TimeLockSalts>,
+    kdf:       Option<KdfParams>,
+    params:    Option<TimeLockParams>,
 ) -> Result<TimeLockKey, TimeLockError> {
-    match time {
-        Some(t) => {
-            #[cfg(not(feature = "enc-timelock-async-keygen-input"))]
-            return Err(TimeLockError::ForbiddenAction(
-                "enc-timelock-async-keygen-input feature is required to pass an explicit time"
-            ));
-            #[cfg(feature = "enc-timelock-async-keygen-input")]
-            return derive_key_scheduled_at_async(
-                cadence, t, precision, format, salts, params,
-            ).await;
-        }
-        None => {
-            #[cfg(not(feature = "enc-timelock-async-keygen-now"))]
-            return Err(TimeLockError::ForbiddenAction(
-                "enc-timelock-async-keygen-now feature is required to derive from the current clock"
-            ));
-            #[cfg(feature = "enc-timelock-async-keygen-now")]
-            return derive_key_scheduled_now_async(
-                utility::pack(precision, format, &cadence),
-                salts,
-                params,
-            ).await;
+    if let Some(p) = params {
+        let _ = (cadence, time, precision, format, salts, kdf);
+        #[cfg(not(feature = "enc-timelock-async-keygen-now"))]
+        return Err(TimeLockError::ForbiddenAction(
+            "enc-timelock-async-keygen-now feature is required for the async _now (decryption) path"
+        ));
+        #[cfg(feature = "enc-timelock-async-keygen-now")]
+        return derive_key_scheduled_now_async(p).await;
+    } else {
+        #[cfg(not(feature = "enc-timelock-async-keygen-input"))]
+        return Err(TimeLockError::ForbiddenAction(
+            "enc-timelock-async-keygen-input feature is required for the async _at (encryption) path"
+        ));
+        #[cfg(feature = "enc-timelock-async-keygen-input")]
+        {
+            let c  = cadence.ok_or(TimeLockError::ForbiddenAction("_at path: cadence must be Some"))?;
+            let t  = time.ok_or(TimeLockError::ForbiddenAction("_at path: time must be Some"))?;
+            let pr = precision.ok_or(TimeLockError::ForbiddenAction("_at path: precision must be Some"))?;
+            let fm = format.ok_or(TimeLockError::ForbiddenAction("_at path: format must be Some"))?;
+            let sl = salts.ok_or(TimeLockError::ForbiddenAction("_at path: salts must be Some"))?;
+            let kd = kdf.ok_or(TimeLockError::ForbiddenAction("_at path: kdf must be Some"))?;
+            return derive_key_scheduled_at_async(c, t, pr, fm, sl, kd).await;
         }
     }
 }
@@ -1569,11 +1568,18 @@ mod tests {
     #[cfg(feature = "enc-timelock-keygen-now")]
     #[test]
     fn scheduled_now_none_matches_derive_now() {
-        // cadence_variant=0 (None) + Hour + Hour24 must match derive_key_now exactly
-        let s      = salts();
-        let stored = TimeLockParams { time_precision: 0, time_format: 1, cadence_variant: 0 };
-        let k1 = derive_key_now(TimePrecision::Hour, TimeFormat::Hour24, &s, &fast()).unwrap();
-        let k2 = derive_key_scheduled_now(&stored, &s, &fast()).unwrap();
+        // cadence_variant=0 (None) + Hour + Hour24 must match derive_key_now exactly.
+        // TimeLockParams now carries salts+kdf; build via pack() and clone salts.
+        let s = salts();
+        let f = fast();
+        let stored = pack(
+            TimePrecision::Hour, TimeFormat::Hour24,
+            &TimeLockCadence::None,
+            s.clone(),
+            f,
+        );
+        let k1 = derive_key_now(TimePrecision::Hour, TimeFormat::Hour24, &s, &f).unwrap();
+        let k2 = derive_key_scheduled_now(&stored).unwrap();
         assert_eq!(k1.as_bytes(), k2.as_bytes());
     }
 
@@ -1584,6 +1590,8 @@ mod tests {
             TimePrecision::Minute,
             TimeFormat::Hour24,
             &TimeLockCadence::DayOfWeekInMonth(Weekday::Tuesday, Month::February),
+            salts(),
+            fast(),
         );
         assert_eq!(params.time_precision, 2);  // Minute
         assert_eq!(params.time_format, 1);      // Hour24

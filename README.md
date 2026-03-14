@@ -68,25 +68,25 @@ Add to `Cargo.toml`:
 ```toml
 [dependencies]
 # VEIL cipher only
-toolkit-zero = { version = "3.1", features = ["serialization"] }
+toolkit-zero = { version = "3.2", features = ["serialization"] }
 
 # HTTP server only
-toolkit-zero = { version = "3.1", features = ["socket-server"] }
+toolkit-zero = { version = "3.2", features = ["socket-server"] }
 
 # HTTP client only
-toolkit-zero = { version = "3.1", features = ["socket-client"] }
+toolkit-zero = { version = "3.2", features = ["socket-client"] }
 
 # Both sides
-toolkit-zero = { version = "3.1", features = ["socket"] }
+toolkit-zero = { version = "3.2", features = ["socket"] }
 
 # Geolocation (pulls in socket-server automatically)
-toolkit-zero = { version = "3.1", features = ["location"] }
+toolkit-zero = { version = "3.2", features = ["location"] }
 
 # Full time-lock encryption suite
-toolkit-zero = { version = "3.1", features = ["encryption"] }
+toolkit-zero = { version = "3.2", features = ["encryption"] }
 
 # Re-export deps alongside socket-server
-toolkit-zero = { version = "3.1", features = ["socket-server", "backend-deps"] }
+toolkit-zero = { version = "3.2", features = ["socket-server", "backend-deps"] }
 ```
 
 ---
@@ -668,13 +668,13 @@ The key is only reproducible at the right time with the right salts.  Paired wit
 
 ### Timelock features
 
-| Feature | Sync/Async | Entry point |
-|---|---|---|
-| `enc-timelock-keygen-now` | sync | `derive_key_now` — reads the system clock |
-| `enc-timelock-keygen-input` | sync | `derive_key_at` — caller supplies `TimeLockTime` |
-| `enc-timelock-async-keygen-now` | async | `derive_key_now_async` |
-| `enc-timelock-async-keygen-input` | async | `derive_key_at_async` |
-| `encryption` | both | all four above |
+| Feature | Sync/Async | Entry point | Path |
+|---|---|---|---|
+| `enc-timelock-keygen-input` | sync | `timelock(…, None)` | Encryption — derive from explicit time |
+| `enc-timelock-keygen-now` | sync | `timelock(…, Some(p))` | Decryption — derive from system clock + header |
+| `enc-timelock-async-keygen-input` | async | `timelock_async(…, None)` | Async encryption |
+| `enc-timelock-async-keygen-now` | async | `timelock_async(…, Some(p))` | Async decryption |
+| `encryption` | both | both entry points | All four paths |
 
 ### KDF presets
 
@@ -692,34 +692,42 @@ The key is only reproducible at the right time with the right salts.  Paired wit
 ### Timelock usage
 
 ```rust
-use toolkit_zero::encryption::timelock::{
-    derive_key_at, derive_key_now,
-    KdfPreset, TimeLockSalts, TimeLockTime,
-    TimePrecision, TimeFormat,
-};
+use toolkit_zero::encryption::timelock::*;
 
-// ── Encryption side ── caller sets the unlock time
-let salts   = TimeLockSalts::generate();          // store in ciphertext header
-let at      = TimeLockTime::new(14, 30).unwrap();
-let enc_key = derive_key_at(
-    at,
-    TimePrecision::Minute,
-    TimeFormat::Hour24,
-    &salts,
-    &KdfPreset::BalancedMac.params(),             // ~2 s on M2
+// ── Encryption side ── caller sets the unlock time ─────────────────────────
+let salts = TimeLockSalts::generate();
+let kdf   = KdfPreset::BalancedMac.params();      // ~2 s on M2
+let at    = TimeLockTime::new(14, 30).unwrap();
+// params = None → _at (encryption) path
+let enc_key = timelock(
+    Some(TimeLockCadence::None),
+    Some(at),
+    Some(TimePrecision::Minute),
+    Some(TimeFormat::Hour24),
+    Some(salts.clone()),
+    Some(kdf),
+    None,
 ).unwrap();
 
-// ── Decryption side ── re-derives from the live clock
-let dec_key = derive_key_now(
-    TimePrecision::Minute,
-    TimeFormat::Hour24,
-    &salts,
-    &KdfPreset::BalancedMac.params(),
+// Pack all settings — including salts and KDF params — into a self-contained
+// header.  Salts and KDF params are not secret; store the header in plaintext
+// alongside the ciphertext so the decryption side can reconstruct the key.
+let header = pack(TimePrecision::Minute, TimeFormat::Hour24,
+                  &TimeLockCadence::None, salts, kdf);
+
+// ── Decryption side ── re-derives from the live clock ───────────────────────
+// Load header from ciphertext; call at 14:30 local time.
+// params = Some(header) → _now (decryption) path
+let dec_key = timelock(
+    None, None, None, None, None, None,
+    Some(header),
 ).unwrap();
 assert_eq!(enc_key.as_bytes(), dec_key.as_bytes());
 ```
 
-For async usage replace `derive_key_at` / `derive_key_now` with their `_async` variants (feature `enc-timelock-async-keygen-*`); salts and params are taken by value.
+For async usage replace `timelock` with `timelock_async` and `.await` the result.
+All arguments are taken by value.  Requires the matching `enc-timelock-async-keygen-*`
+feature(s).
 
 ---
 
@@ -743,7 +751,7 @@ Each re-export inside `backend_deps` is individually gated on its parent feature
 
 ```toml
 # Example: socket-server + dep re-exports
-toolkit-zero = { version = "3.1", features = ["socket-server", "backend-deps"] }
+toolkit-zero = { version = "3.2", features = ["socket-server", "backend-deps"] }
 ```
 
 Then in your code:

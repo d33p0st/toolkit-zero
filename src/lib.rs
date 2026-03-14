@@ -285,32 +285,33 @@
 //! `BalancedX86`, `ParanoidX86`, `BalancedArm`, `ParanoidArm`, and `Custom(KdfParams)`.
 //!
 //! ```rust,no_run
-//! use toolkit_zero::encryption::timelock::{
-//!     timelock, TimeLockCadence,
-//!     KdfPreset, TimeLockSalts, TimeLockTime,
-//!     TimePrecision, TimeFormat,
-//! };
+//! use toolkit_zero::encryption::timelock::*;
 //!
-//! // Encryption side — caller picks the unlock time
+//! // Encryption side — caller sets the unlock time
 //! let salts = TimeLockSalts::generate();
+//! let kdf   = KdfPreset::BalancedMac.params();
 //! let at    = TimeLockTime::new(14, 30).unwrap();
+//! // params = None → _at (encryption) path
 //! let enc_key = timelock(
-//!     TimeLockCadence::None,
+//!     Some(TimeLockCadence::None),
 //!     Some(at),
-//!     TimePrecision::Minute,
-//!     TimeFormat::Hour24,
-//!     &salts,
-//!     &KdfPreset::BalancedMac.params(),
+//!     Some(TimePrecision::Minute),
+//!     Some(TimeFormat::Hour24),
+//!     Some(salts.clone()),
+//!     Some(kdf),
+//!     None,
 //! ).unwrap();
 //!
-//! // Decryption side — re-derives from the current clock at 14:30 local time
+//! // Pack all settings (incl. salts + KDF params) into a self-contained header;
+//! // store it in the ciphertext — salts and KDF params are not secret.
+//! let header = pack(TimePrecision::Minute, TimeFormat::Hour24,
+//!                   &TimeLockCadence::None, salts, kdf);
+//!
+//! // Decryption side — load header from ciphertext; call at 14:30 local time.
+//! // params = Some(header) → _now (decryption) path
 //! let dec_key = timelock(
-//!     TimeLockCadence::None,
-//!     None,
-//!     TimePrecision::Minute,
-//!     TimeFormat::Hour24,
-//!     &salts,
-//!     &KdfPreset::BalancedMac.params(),
+//!     None, None, None, None, None, None,
+//!     Some(header),
 //! ).unwrap();
 //! // enc_key.as_bytes() == dec_key.as_bytes() when called at 14:30 local time
 //! ```
