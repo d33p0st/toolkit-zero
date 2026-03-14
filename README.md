@@ -680,14 +680,17 @@ The key is only reproducible at the right time with the right salts.  Paired wit
 
 [`KdfPreset`](https://docs.rs/toolkit-zero) provides named parameter sets calibrated per platform:
 
-| Preset | Peak RAM | Platform |
+| Preset | Peak RAM | Platform / intended use |
 |---|---|---|
-| `Fast` / `FastMac` / `FastX86` / `FastArm` | ~64 MiB | Dev / CI only |
-| `Balanced` / `BalancedX86` | ~128 MiB | Cross-platform / x86-64 production |
-| `BalancedArm` | ~256 MiB | Linux ARM64 production |
-| `BalancedMac` / `Paranoid` / `ParanoidX86` / `ParanoidArm` | ~512 MiB | Mac production / cross-platform max |
-| `ParanoidMac` | ~1 GiB | macOS max security (~4 s on M2) |
-| `Custom(KdfParams)` | user-defined | Fully manual |
+| `Fast` / `FastX86` | ~128 MiB | Cross-platform / x86-64 dev & CI |
+| `FastArm` | ~256 MiB | Linux ARM64 dev & CI |
+| `FastMac` | ~512 MiB | macOS (Apple Silicon) dev & CI |
+| `Balanced` / `BalancedX86` | ~512 MiB | Cross-platform / x86-64 production |
+| `BalancedArm` | ~512 MiB | Linux ARM64 production |
+| `BalancedMac` | ~1 GiB | macOS (Apple Silicon) production |
+| `Paranoid` / `ParanoidX86` / `ParanoidArm` | ~768 MiB | Cross-platform / x86-64 / ARM64 max security |
+| `ParanoidMac` | ~3 GiB | macOS max security (requires 8+ GiB unified memory) |
+| `Custom(KdfParams)` | user-defined | Fully manual — tune to your hardware |
 
 ### Timelock usage
 
