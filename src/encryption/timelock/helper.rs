@@ -137,3 +137,52 @@ pub(super) fn scrypt_pass(
         .map_err(|e| TimeLockError::Scrypt(e.to_string()))?;
     Ok(out)
 }
+
+// ─── cadence formatters ───────────────────────────────────────────────────────
+
+/// Read the appropriate calendar dimension(s) from the live clock based on the
+/// cadence variant discriminant, returning the prefix to prepend to the time
+/// string when baking the KDF input on the decryption (`_now`) path.
+///
+/// | `variant` | Prefix format                         |
+/// |-----------|---------------------------------------|
+/// | `0` None  | `""` (empty — pure time-lock)         |
+/// | `1`       | `"<WeekdayName>\|"`                   |
+/// | `2`       | `"<day-of-month>\|"`                  |
+/// | `3`       | `"<MonthName>\|"`                     |
+/// | `4`       | `"<WeekdayName>+<MonthName>\|"`       |
+/// | `5`       | `"<day-of-month>+<MonthName>\|"`      |
+/// | `6`       | `"<WeekdayName>+<day-of-month>\|"`    |
+///
+/// Unknown variant values are silently treated as `0` (no prefix).
+#[cfg(feature = "enc-timelock-keygen-now")]
+pub(super) fn bake_cadence_now(cadence_variant: u8) -> Result<String, TimeLockError> {
+    use chrono::Datelike as _;
+    let now = chrono::Local::now();
+    match cadence_variant {
+        0 => Ok(String::new()),
+        1 => {
+            let wd = super::Weekday::from_chrono(now.weekday());
+            Ok(format!("{}|", wd.name()))
+        }
+        2 => Ok(format!("{}|", now.day())),
+        3 => {
+            let m = super::Month::from_number(now.month() as u8);
+            Ok(format!("{}|", m.name()))
+        }
+        4 => {
+            let wd = super::Weekday::from_chrono(now.weekday());
+            let m  = super::Month::from_number(now.month() as u8);
+            Ok(format!("{}+{}|", wd.name(), m.name()))
+        }
+        5 => {
+            let m = super::Month::from_number(now.month() as u8);
+            Ok(format!("{}+{}|", now.day(), m.name()))
+        }
+        6 => {
+            let wd = super::Weekday::from_chrono(now.weekday());
+            Ok(format!("{}+{}|", wd.name(), now.day()))
+        }
+        _ => Ok(String::new()),
+    }
+}

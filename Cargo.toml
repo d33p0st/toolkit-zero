@@ -1,8 +1,9 @@
 [package]
 name = "toolkit-zero"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2024"
 rust-version = "1.85"
+authors = ["Soumyo Deep Gupta <deep.main.ac@gmail.com>"]
 description = "A feature-selective Rust utility toolkit — a growing collection of categorized utilities you can opt into via Cargo features, including only what you need."
 license = "MIT"
 repository = "https://github.com/d33p0st/toolkit-zero.git"
@@ -10,8 +11,15 @@ homepage = "https://d33p0st.github.io/toolkit-zero/"
 documentation = "https://docs.rs/toolkit-zero"
 readme = "README.md"
 keywords = ["encryption", "kdf", "timelock", "socket", "geolocation"]
-categories = ["cryptography", "network-programming", "web-programming"]
+categories = ["cryptography", "network-programming", "web-programming", "asynchronous", "authentication"]
 exclude = ["target/", ".github/", "*.d"]
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 argon2  = { version = "0.5", optional = true, features = ["zeroize"] }
@@ -68,3 +76,19 @@ enc-timelock-keygen-input = ["dep:argon2", "dep:scrypt", "dep:zeroize", "dep:chr
 enc-timelock-async-keygen-now = ["enc-timelock-keygen-now", "dep:tokio", "tokio/rt"]
 enc-timelock-async-keygen-input = ["enc-timelock-keygen-input", "dep:tokio", "tokio/rt"]
 backend-deps = []
+
+[[example]]
+name = "timelock_round_trip"
+required-features = ["encryption"]
+
+[[example]]
+name = "veil_seal_open"
+required-features = ["serialization"]
+
+[profile.release]
+opt-level       = 3        # maximum optimisation
+lto             = "fat"    # whole-program LTO — dead code eliminated, attack surface reduced
+codegen-units   = 1        # single codegen unit → best inlining + hardest to reverse
+panic           = "abort"  # no unwinding on panic; prevents intermediate state leakage
+overflow-checks = true     # catch integer overflows even in release (security-critical)
+strip           = "debuginfo"  # strip DWARF info; keep symbol names for usable stack traces

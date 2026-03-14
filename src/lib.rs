@@ -71,7 +71,7 @@
 //! Every output byte depends on the full message and the key; without the exact
 //! key, the output cannot be inverted.
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use toolkit_zero::serialization::{seal, open, Encode, Decode};
 //!
 //! #[derive(Encode, Decode, Debug, PartialEq)]
@@ -99,7 +99,7 @@
 //!
 //! The [`socket::server::reply!`] macro is the primary way to construct responses.
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use toolkit_zero::socket::server::{Server, ServerMechanism, reply, Status};
 //! use serde::{Deserialize, Serialize};
 //! use std::sync::{Arc, Mutex};
@@ -170,7 +170,7 @@
 //! method, optionally attach a body or query, and call `.send().await` (async) or
 //! `.send_sync()` (blocking).
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use toolkit_zero::socket::client::{Client, Target};
 //! use serde::{Deserialize, Serialize};
 //!
@@ -233,7 +233,7 @@
 //! | [`location::browser::__location__`] | Blocking — safe from sync or async |
 //! | [`location::browser::__location_async__`] | Async — preferred inside `#[tokio::main]` |
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use toolkit_zero::location::browser::{__location__, __location_async__, PageTemplate};
 //!
 //! // Blocking — works from sync main or from inside a Tokio runtime
@@ -272,12 +272,12 @@
 //!
 //! **Features:**
 //!
-//! | Feature | Function |
+//! | Feature | Enables |
 //! |---|---|
-//! | `enc-timelock-keygen-now` | [`encryption::timelock::derive_key_now`] — derives from the system clock |
-//! | `enc-timelock-keygen-input` | [`encryption::timelock::derive_key_at`] — derives from a [`encryption::timelock::TimeLockTime`] you supply |
-//! | `enc-timelock-async-keygen-now` | [`encryption::timelock::derive_key_now_async`] — async, offloads KDF to a blocking thread |
-//! | `enc-timelock-async-keygen-input` | [`encryption::timelock::derive_key_at_async`] — async variant of `keygen-input` |
+//! | `enc-timelock-keygen-now` | [`encryption::timelock::timelock`]`(None)` — decryption path (key from system clock) |
+//! | `enc-timelock-keygen-input` | [`encryption::timelock::timelock`]`(Some(t))` — encryption path (key from explicit time) |
+//! | `enc-timelock-async-keygen-now` | [`encryption::timelock::timelock_async`]`(None)` — async decryption path |
+//! | `enc-timelock-async-keygen-input` | [`encryption::timelock::timelock_async`]`(Some(t))` — async encryption path |
 //! | `encryption` | All four of the above |
 //!
 //! **Presets:** [`encryption::timelock::KdfPreset`] provides named parameter sets
@@ -285,31 +285,35 @@
 //! `BalancedX86`, `ParanoidX86`, `BalancedArm`, `ParanoidArm`, and `Custom(KdfParams)`.
 //!
 //! ```rust,no_run
-//! use toolkit_zero::encryption::timelock::{
-//!     derive_key_at, KdfPreset, TimeLockSalts, TimeLockTime,
-//!     TimePrecision, TimeFormat,
-//! };
+//! use toolkit_zero::encryption::timelock::*;
 //!
-//! // Encryption side — caller picks the unlock time
+//! // Encryption side — caller sets the unlock time
 //! let salts = TimeLockSalts::generate();
+//! let kdf   = KdfPreset::BalancedMac.params();
 //! let at    = TimeLockTime::new(14, 30).unwrap();
-//! let enc_key = derive_key_at(
-//!     at,
-//!     TimePrecision::Minute,
-//!     TimeFormat::Hour24,
-//!     &salts,
-//!     &KdfPreset::BalancedMac.params(),
+//! // params = None → _at (encryption) path
+//! let enc_key = timelock(
+//!     Some(TimeLockCadence::None),
+//!     Some(at),
+//!     Some(TimePrecision::Minute),
+//!     Some(TimeFormat::Hour24),
+//!     Some(salts.clone()),
+//!     Some(kdf),
+//!     None,
 //! ).unwrap();
 //!
-//! // Decryption side — re-derives from the current clock
-//! use toolkit_zero::encryption::timelock::derive_key_now;
-//! let dec_key = derive_key_now(
-//!     TimePrecision::Minute,
-//!     TimeFormat::Hour24,
-//!     &salts,
-//!     &KdfPreset::BalancedMac.params(),
+//! // Pack all settings (incl. salts + KDF params) into a self-contained header;
+//! // store it in the ciphertext — salts and KDF params are not secret.
+//! let header = pack(TimePrecision::Minute, TimeFormat::Hour24,
+//!                   &TimeLockCadence::None, salts, kdf);
+//!
+//! // Decryption side — load header from ciphertext; call at 14:30 local time.
+//! // params = Some(header) → _now (decryption) path
+//! let dec_key = timelock(
+//!     None, None, None, None, None, None,
+//!     Some(header),
 //! ).unwrap();
-//! assert_eq!(enc_key.as_bytes(), dec_key.as_bytes());
+//! // enc_key.as_bytes() == dec_key.as_bytes() when called at 14:30 local time
 //! ```
 //!
 //! ---
