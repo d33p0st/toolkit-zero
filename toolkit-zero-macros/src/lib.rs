@@ -6,8 +6,11 @@
 //! - [`mechanism`] — server-side route declaration, via `toolkit_zero::socket::server`
 //! - [`request`]   — client-side request shorthand, via `toolkit_zero::socket::client`
 
+#[cfg(any(feature = "socket-server", feature = "socket-client"))]
 use proc_macro::TokenStream;
+#[cfg(any(feature = "socket-server", feature = "socket-client"))]
 use quote::quote;
+#[cfg(any(feature = "socket-server", feature = "socket-client"))]
 use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input, Expr, Ident, ItemFn, LitStr, Token,
@@ -15,6 +18,7 @@ use syn::{
 
 // ─── Argument types ───────────────────────────────────────────────────────────
 
+#[cfg(feature = "socket-server")]
 /// The body/query mode keyword extracted from the attribute arguments.
 enum BodyMode {
     None,
@@ -24,6 +28,7 @@ enum BodyMode {
     EncryptedQuery(Expr),
 }
 
+#[cfg(feature = "socket-server")]
 /// Fully parsed attribute arguments.
 struct MechanismArgs {
     /// The `Server` variable identifier in the enclosing scope.
@@ -38,6 +43,7 @@ struct MechanismArgs {
     body_mode: BodyMode,
 }
 
+#[cfg(feature = "socket-server")]
 impl Parse for MechanismArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         // ── Positional: server_ident, METHOD, "/path" ─────────────────────
@@ -139,6 +145,7 @@ impl Parse for MechanismArgs {
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "socket-server")]
 /// Extract `(&Pat, &Type)` from a `FnArg::Typed`. Emits a proper error for
 /// `FnArg::Receiver` (i.e. `self`).
 fn extract_pat_ty<'a>(
@@ -158,6 +165,7 @@ fn extract_pat_ty<'a>(
 
 // ─── Attribute macro ──────────────────────────────────────────────────────────
 
+#[cfg(feature = "socket-server")]
 /// Concise route declaration for `toolkit-zero` socket-server routes.
 ///
 /// Replaces an `async fn` item with a `server.mechanism(…)` statement at the
@@ -266,6 +274,7 @@ fn extract_pat_ty<'a>(
 ///     server.serve(([127, 0, 0, 1], 8080)).await;
 /// }
 /// ```
+#[cfg(feature = "socket-server")]
 #[proc_macro_attribute]
 pub fn mechanism(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as MechanismArgs);
@@ -516,6 +525,7 @@ pub fn mechanism(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 // ─── Client-side: #[request] ─────────────────────────────────────────────────
 
+#[cfg(feature = "socket-client")]
 /// Body/query attachment mode for a client request.
 enum RequestBodyMode {
     None,
@@ -525,12 +535,14 @@ enum RequestBodyMode {
     EncryptedQuery(Expr, Expr),
 }
 
+#[cfg(feature = "socket-client")]
 /// Whether to call `.send().await?` or `.send_sync()?`.
 enum SendMode {
     Async,
     Sync,
 }
 
+#[cfg(feature = "socket-client")]
 /// Fully parsed `#[request]` attribute arguments.
 struct RequestArgs {
     client: Ident,
@@ -540,6 +552,7 @@ struct RequestArgs {
     send:   SendMode,
 }
 
+#[cfg(feature = "socket-client")]
 /// Parse the mandatory final `, async` or `, sync` keyword.
 fn parse_send_mode(input: ParseStream) -> syn::Result<SendMode> {
     input.parse::<Token![,]>()?;
@@ -558,6 +571,7 @@ fn parse_send_mode(input: ParseStream) -> syn::Result<SendMode> {
     }
 }
 
+#[cfg(feature = "socket-client")]
 impl Parse for RequestArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         // ── Positional: client_ident, METHOD, "/path" ─────────────────────
@@ -696,6 +710,7 @@ impl Parse for RequestArgs {
 ///     Ok(())
 /// }
 /// ```
+#[cfg(feature = "socket-client")]
 #[proc_macro_attribute]
 pub fn request(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as RequestArgs);

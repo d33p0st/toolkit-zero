@@ -6,12 +6,16 @@ Procedural macros for [`toolkit-zero`](https://crates.io/crates/toolkit-zero).
 > Do not depend on it directly. Add `toolkit-zero` with the appropriate
 > feature flag and use the re-exported attribute macros:
 >
-> | Macro | Feature flag | Import path |
-> |---|---|---|
-> | `#[mechanism]` | `socket-server` | `toolkit_zero::socket::server::mechanism` |
-> | `#[request]` | `socket-client` | `toolkit_zero::socket::client::request` |
+> | Macro | `toolkit-zero` feature flag | `toolkit-zero-macros` feature gate | Import path |
+> |---|---|---|---|
+> | `#[mechanism]` | `socket-server` | `socket-server` | `toolkit_zero::socket::server::mechanism` |
+> | `#[request]` | `socket-client` | `socket-client` | `toolkit_zero::socket::client::request` |
 >
 > Both are also available via `toolkit_zero::socket::prelude::*`.
+>
+> The `toolkit-zero-macros/socket-server` and `toolkit-zero-macros/socket-client` feature
+> gates are automatically activated by the corresponding `toolkit-zero` features — you do
+> not need to set them manually.
 
 ---
 

@@ -21,6 +21,7 @@ A feature-selective Rust utility crate. Declare only the modules your project re
    - [Graceful shutdown](#graceful-shutdown)
    - [Building responses](#building-responses)
    - [Sync handlers](#sync-handlers)
+   - [`#[mechanism]` attribute macro](#mechanism-attribute-macro)
 5. [Socket — client](#socket--client)
    - [Creating a client](#creating-a-client)
    - [Plain requests](#plain-requests)
@@ -28,6 +29,7 @@ A feature-selective Rust utility crate. Declare only the modules your project re
    - [Query parameter requests](#query-parameter-requests)
    - [VEIL-encrypted requests](#veil-encrypted-requests)
    - [Sync vs async sends](#sync-vs-async-sends)
+   - [`#[request]` attribute macro](#request-attribute-macro)
 6. [Location](#location)
    - [Blocking usage](#blocking-usage)
    - [Async usage](#async-usage)
@@ -624,6 +626,54 @@ Using the wrong variant panics **at the call site** with an explicit message poi
 - Calling `.send_sync()` on a `new_async()` client → *`"Client was created with new_async() — call new_sync() or new() to use sync sends"`*
 
 These call-site panics are distinct from the **construction-time** panic that `Client::new()` (and `Client::new_sync()`) raises when constructed inside an active Tokio runtime — see [Creating a client](#creating-a-client).
+
+### `#[request]` attribute macro
+
+The `#[request]` attribute is a concise alternative to the builder calls above.  It replaces the decorated `fn` in-place with a `let` binding that performs the HTTP request — no separate variable declaration required.  The **function name** becomes the binding name; the **return type** becomes `R` in the `.send::<R>()` turbofish.  The function body is discarded.
+
+```rust
+use toolkit_zero::socket::client::{Client, Target, request};
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, Serialize, Clone)] struct Item    { id: u32, name: String }
+#[derive(Serialize)]                     struct NewItem  { name: String }
+#[derive(Serialize)]                     struct Filter   { page: u32 }
+
+async fn example() -> Result<(), reqwest::Error> {
+    let client = Client::new_async(Target::Localhost(8080));
+
+    // Plain async GET
+    #[request(client, GET, "/items", async)]
+    async fn items() -> Vec<Item> {}
+
+    // POST with JSON body
+    #[request(client, POST, "/items", json(NewItem { name: "widget".into() }), async)]
+    async fn created() -> Item {}
+
+    // GET with query params
+    #[request(client, GET, "/items", query(Filter { page: 2 }), async)]
+    async fn page() -> Vec<Item> {}
+
+    // Synchronous DELETE
+    #[request(client, DELETE, "/items/1", sync)]
+    fn deleted() -> Item {}
+
+    Ok(())
+}
+```
+
+**Supported forms:**
+
+| Attribute | Generated call | Error type from `?` |
+|---|---|---|
+| `#[request(client, METHOD, "/path", async)]` | `.send::<R>().await?` | `reqwest::Error` |
+| `#[request(client, METHOD, "/path", sync)]` | `.send_sync::<R>()?` | `reqwest::Error` |
+| `#[request(client, METHOD, "/path", json(expr), async\|sync)]` | `.json(expr).send::<R>()` | `reqwest::Error` |
+| `#[request(client, METHOD, "/path", query(expr), async\|sync)]` | `.query(expr).send::<R>()` | `reqwest::Error` |
+| `#[request(client, METHOD, "/path", encrypted(body, key), async\|sync)]` | `.encryption(body, key).send::<R>()` | `ClientError` |
+| `#[request(client, METHOD, "/path", encrypted_query(params, key), async\|sync)]` | `.encrypted_query(params, key).send::<R>()` | `ClientError` |
+
+The return type annotation on the `fn` is **required** — omitting it is a compile error.
 
 ---
 
