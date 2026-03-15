@@ -172,6 +172,41 @@
 //! The body or query is decrypted before the handler is called; a wrong key or
 //! corrupt payload returns `403 Forbidden` automatically.
 //!
+//! ### `#[mechanism]` attribute macro
+//!
+//! The [`socket::server::mechanism`] attribute macro is a concise alternative to
+//! the builder calls above. It replaces the decorated `async fn` in-place with the
+//! equivalent `server.mechanism(...)` statement — no separate registration step
+//! required. All 10 builder combinations are supported: plain, `json`, `query`,
+//! `state`, `encrypted`, `encrypted_query`, and every `state + …` combination.
+//!
+//! ```rust,ignore
+//! use toolkit_zero::socket::server::{Server, mechanism, reply, Status};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Deserialize)]
+//! struct NewItem { name: String }
+//!
+//! #[derive(Serialize, Clone)]
+//! struct Item { id: u32, name: String }
+//!
+//! # async fn run() {
+//! let mut server = Server::default();
+//!
+//! #[mechanism(server, GET, "/health")]
+//! async fn health() { reply!() }
+//!
+//! #[mechanism(server, POST, "/items", json)]
+//! async fn create_item(body: NewItem) {
+//!     reply!(json => Item { id: 1, name: body.name }, status => Status::Created)
+//! }
+//!
+//! server.serve(([127, 0, 0, 1], 8080)).await;
+//! # }
+//! ```
+//!
+//! See [`socket::server::mechanism`] for the full syntax reference.
+//!
 //! ---
 //!
 //! ## Socket — client

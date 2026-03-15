@@ -18,11 +18,17 @@
 //! - **No extras** — handler receives no arguments
 //! - **JSON body** — via `.json::<T>()`, handler receives `T: DeserializeOwned`
 //! - **Query params** — via `.query::<T>()`, handler receives `T: DeserializeOwned`
+//! - **VEIL-encrypted body** — via `.encryption::<T>(key)`, body is decrypted before delivery
+//! - **VEIL-encrypted query** — via `.encrypted_query::<T>(key)`, query is decrypted before delivery
 //! - **Shared state** — via `.state(s)`, handler receives a clone of `S`
-//! - **State + JSON / State + query** — combinations of the above
+//! - **State + body / State + query** — any of the above combined with `.state(s)`
 //!
 //! Each branch finalises with `.onconnect(async handler)` or the unsafe `.onconnect_sync(sync handler)`.
 //! Use the [`reply!`] macro (or standalone helpers) to construct the response.
+//!
+//! The [`server::mechanism`] attribute macro is an ergonomic shorthand for the full builder call:
+//! `#[mechanism(server, POST, "/items", json)]` on an `async fn` is exactly equivalent to
+//! writing `server.mechanism(ServerMechanism::post("/items").json::<T>().onconnect(handler))`.
 //!
 //! ```rust,no_run
 //! # use toolkit_zero::socket::server::*;

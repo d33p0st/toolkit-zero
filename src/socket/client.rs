@@ -66,6 +66,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crate::socket::SerializationKey;
 use crate::serialization::SerializationError;
 
+pub use toolkit_zero_macros::request;
+
 fn build_url(base: &str, endpoint: &str) -> String {
     let ep = endpoint.trim_start_matches('/');
     if ep.is_empty() {

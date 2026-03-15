@@ -405,6 +405,63 @@ unsafe {
 
 `onconnect_sync` is available on every builder variant: plain, `.json`, `.query`, `.state`, and their combinations.  All have identical safety requirements.
 
+### `#[mechanism]` attribute macro
+
+The `#[mechanism]` attribute is a concise alternative to the builder calls above.  It replaces the decorated `async fn` in-place with the equivalent `server.mechanism(…)` statement — no separate registration step required.
+
+```rust
+use toolkit_zero::socket::server::{Server, mechanism, reply, Status};
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+
+#[derive(Deserialize)]                  struct NewItem  { name: String }
+#[derive(Serialize, Clone)]             struct Item     { id: u32, name: String }
+
+#[tokio::main]
+async fn main() {
+    let mut server = Server::default();
+    let db: Arc<Mutex<Vec<Item>>> = Arc::new(Mutex::new(vec![]));
+
+    // No body, no state
+    #[mechanism(server, GET, "/health")]
+    async fn health() { reply!() }
+
+    // JSON body
+    #[mechanism(server, POST, "/items", json)]
+    async fn create_item(body: NewItem) {
+        reply!(json => Item { id: 1, name: body.name }, status => Status::Created)
+    }
+
+    // State + JSON body
+    #[mechanism(server, POST, "/items/add", state(db.clone()), json)]
+    async fn add_item(db: Arc<Mutex<Vec<Item>>>, body: NewItem) {
+        let id = db.lock().unwrap().len() as u32 + 1;
+        let item = Item { id, name: body.name };
+        db.lock().unwrap().push(item.clone());
+        reply!(json => item, status => Status::Created)
+    }
+
+    server.serve(([127, 0, 0, 1], 8080)).await;
+}
+```
+
+**Supported forms:**
+
+| Attribute | fn parameters |
+|---|---|
+| `#[mechanism(server, METHOD, "/path")]` | `()` |
+| `#[mechanism(server, METHOD, "/path", json)]` | `(body: T)` |
+| `#[mechanism(server, METHOD, "/path", query)]` | `(params: T)` |
+| `#[mechanism(server, METHOD, "/path", encrypted(key))]` | `(body: T)` |
+| `#[mechanism(server, METHOD, "/path", encrypted_query(key))]` | `(params: T)` |
+| `#[mechanism(server, METHOD, "/path", state(expr))]` | `(state: S)` |
+| `#[mechanism(server, METHOD, "/path", state(expr), json)]` | `(state: S, body: T)` |
+| `#[mechanism(server, METHOD, "/path", state(expr), query)]` | `(state: S, params: T)` |
+| `#[mechanism(server, METHOD, "/path", state(expr), encrypted(key))]` | `(state: S, body: T)` |
+| `#[mechanism(server, METHOD, "/path", state(expr), encrypted_query(key))]` | `(state: S, params: T)` |
+
+The keywords after the path (`json`, `query`, `state`, `encrypted`, `encrypted_query`) may appear in any order.
+
 ---
 
 ## Socket — client

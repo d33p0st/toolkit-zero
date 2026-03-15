@@ -16,15 +16,50 @@
 //!
 //! | Chain | Handler receives |
 //! |---|---|
-//! | `mechanism(method, path).onconnect(f)` | nothing |
+//! | `ServerMechanism::method(path).onconnect(f)` | nothing |
 //! | `.json::<T>().onconnect(f)` | `T: DeserializeOwned` |
 //! | `.query::<T>().onconnect(f)` | `T: DeserializeOwned` |
+//! | `.encryption::<T>(key).onconnect(f)` | `T: bincode::Decode<()>` (VEIL-decrypted body) |
+//! | `.encrypted_query::<T>(key).onconnect(f)` | `T: bincode::Decode<()>` (VEIL-decrypted query) |
 //! | `.state(s).onconnect(f)` | `S: Clone + Send + Sync` |
 //! | `.state(s).json::<T>().onconnect(f)` | `(S, T)` |
 //! | `.state(s).query::<T>().onconnect(f)` | `(S, T)` |
+//! | `.state(s).encryption::<T>(key).onconnect(f)` | `(S, T)` — VEIL-decrypted body |
+//! | `.state(s).encrypted_query::<T>(key).onconnect(f)` | `(S, T)` — VEIL-decrypted query |
 //!
 //! For blocking handlers (not recommended in production) every finaliser also
 //! has an unsafe `onconnect_sync` counterpart.
+//!
+//! # `#[mechanism]` attribute macro
+//!
+//! As an alternative to spelling out the builder chain by hand, the
+//! [`mechanism`] attribute macro collapses the entire
+//! `server.mechanism(ServerMechanism::method(path) … .onconnect(handler))` call
+//! into a single decorated `async fn`:
+//!
+//! ```rust,no_run
+//! # use toolkit_zero::socket::server::{Server, mechanism, reply, Status};
+//! # use serde::Deserialize;
+//! # #[derive(Deserialize)] struct NewItem { name: String }
+//! # #[derive(serde::Serialize)] struct Item { id: u32, name: String }
+//! # let mut server = Server::default();
+//! // Fluent form:
+//! // server.mechanism(
+//! //     ServerMechanism::post("/items")
+//! //         .json::<NewItem>()
+//! //         .onconnect(|body: NewItem| async move {
+//! //             reply!(json => Item { id: 1, name: body.name }, status => Status::Created)
+//! //         })
+//! // );
+//!
+//! // Equivalent attribute form:
+//! #[mechanism(server, POST, "/items", json)]
+//! async fn create(body: NewItem) {
+//!     reply!(json => Item { id: 1, name: body.name }, status => Status::Created)
+//! }
+//! ```
+//!
+//! See the [`mechanism`] item for the full syntax reference.
 //!
 //! # Response helpers
 //!
@@ -50,6 +85,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use warp::{Filter, Rejection, Reply, filters::BoxedFilter};
 
 pub use super::SerializationKey;
+pub use toolkit_zero_macros::mechanism;
 
 /// A fully assembled, type-erased HTTP route ready to be registered on a [`Server`].
 ///
