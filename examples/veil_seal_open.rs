@@ -35,19 +35,19 @@ fn main() {
 
     // ── Seal ──────────────────────────────────────────────────────────────────
     // Transforms Payload into an opaque byte blob.
-    let blob = seal(&original, Some(key)).expect("seal failed");
+    let blob = seal(&original, Some(key.to_string())).expect("seal failed");
     println!("Sealed   : {} bytes  (opaque — no structure visible)", blob.len());
 
     // ── Open ──────────────────────────────────────────────────────────────────
     // Reconstructs Payload from the opaque blob using the same key.
-    let recovered: Payload = open(&blob, Some(key)).expect("open failed");
+    let recovered: Payload = open(&blob, Some(key.to_string())).expect("open failed");
     println!("Recovered: {recovered:?}");
 
     assert_eq!(original, recovered, "round-trip mismatch!");
     println!("\nRound-trip successful ✓");
 
     // ── Wrong key rejects ─────────────────────────────────────────────────────
-    let bad: Result<Payload, _> = open(&blob, Some("wrong-key"));
+    let bad: Result<Payload, _> = open(&blob, Some("wrong-key".to_string()));
     assert!(bad.is_err(), "wrong key should fail to open");
     println!("Wrong-key rejection ✓");
 }

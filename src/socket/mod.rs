@@ -96,7 +96,7 @@
 //! # #[derive(Deserialize, Serialize)] struct Filter { page: u32 }
 //! # async fn example() -> Result<(), reqwest::Error> {
 //!
-//! let client = Client::new(Target::Localhost(8080));
+//! let client = Client::new_async(Target::Localhost(8080));
 //!
 //! // ── GET /items ───────────────────────────────────────────────────────────
 //! // Server:
@@ -169,10 +169,10 @@ pub enum SerializationKey {
 
 impl SerializationKey {
     #[doc(hidden)]
-    pub fn veil_key(&self) -> Option<&str> {
+    pub fn veil_key(&self) -> Option<String> {
         match self {
             Self::Default => None,
-            Self::Value(k) => Some(k.as_str()),
+            Self::Value(k) => Some(k.clone()),
         }
     }
 }

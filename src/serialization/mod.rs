@@ -59,8 +59,8 @@
 //! assert_eq!(p, back);
 //!
 //! // with an explicit key
-//! let blob2 = seal(&p, Some("my secret key")).unwrap();
-//! let back2: Point = open(&blob2, Some("my secret key")).unwrap();
+//! let blob2 = seal(&p, Some("my secret key".to_string())).unwrap();
+//! let back2: Point = open(&blob2, Some("my secret key".to_string())).unwrap();
 //! assert_eq!(p, back2);
 //! ```
 
@@ -68,6 +68,12 @@ mod veil;
 
 pub use veil::{seal, open, SerializationError};
 pub use bincode::{Encode, Decode};
+// Re-exported so that `#[serializable]` users don't need a direct `bincode` dep.
+// bincode's proc-macro derive generates code that resolves `bincode::` against
+// this path (via `#[bincode(crate = "::toolkit_zero::serialization::bincode")]`
+// injected by the macro).
+pub use bincode;
+pub use toolkit_zero_macros::{serializable, serialize, deserialize};
 
 #[cfg(feature = "backend-deps")]
 pub mod backend_deps;

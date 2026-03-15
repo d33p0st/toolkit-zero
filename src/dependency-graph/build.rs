@@ -1,6 +1,6 @@
 //! Build-time fingerprint generator for use in a downstream `build.rs`.
 //!
-//! Produces **`ironprint.json`** in `$OUT_DIR`: a compact, normalised,
+//! Produces **`fingerprint.json`** in `$OUT_DIR`: a compact, normalised,
 //! deterministically sorted JSON document capturing a stable snapshot of the
 //! build environment.
 //!
@@ -8,8 +8,8 @@
 //!
 //! | Function | Description |
 //! |---|---|
-//! | [`generate_ironprint`] | Always call this. Writes compact `ironprint.json` to `$OUT_DIR` and emits `cargo:rerun-if-changed` directives. |
-//! | [`export`] | Optional. Writes a pretty-printed `ironprint.json` alongside `Cargo.toml` for local inspection. Pass `false` or condition on `cfg!(debug_assertions)` to suppress in release builds. |
+//! | [`generate_fingerprint`] | Always call this. Writes compact `fingerprint.json` to `$OUT_DIR` and emits `cargo:rerun-if-changed` directives. |
+//! | [`export`] | Optional. Writes a pretty-printed `fingerprint.json` alongside `Cargo.toml` for local inspection. Pass `false` or condition on `cfg!(debug_assertions)` to suppress in release builds. |
 //!
 //! ## Sections captured
 //!
@@ -27,18 +27,18 @@
 //!
 //! ```rust,ignore
 //! fn main() {
-//!     toolkit_zero::dependency_graph::build::generate_ironprint()
-//!         .expect("ironprint generation failed");
+//!     toolkit_zero::dependency_graph::build::generate_fingerprint()
+//!         .expect("fingerprint generation failed");
 //!     // optional — pretty-print alongside Cargo.toml for local inspection
 //!     toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
-//!         .expect("ironprint export failed");
+//!         .expect("fingerprint export failed");
 //! }
 //! ```
 //!
 //! Embed the fingerprint in the binary:
 //!
 //! ```rust,ignore
-//! const IRONPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/ironprint.json"));
+//! const BUILD_TIME_FINGERPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
 //! ```
 //!
 //! ## Concerns
@@ -46,7 +46,7 @@
 //! * **Not tamper-proof** — the fingerprint resides as plain text in the binary's
 //!   read-only data section. It is informational in nature; it does not constitute
 //!   a security boundary.
-//! * **Export file** — `export(true)` writes `ironprint.json` to the crate root.
+//! * **Export file** — `export(true)` writes `fingerprint.json` to the crate root.
 //!   Add it to `.gitignore` to prevent unintentional commits.
 //! * **Build-time overhead** — `cargo metadata` is executed on every rebuild.
 //!   The `cargo:rerun-if-changed` directives restrict this to changes in `src/`,
@@ -65,9 +65,9 @@ use sha2::{Digest, Sha256};
 
 // ─── public error ────────────────────────────────────────────────────────────
 
-/// Errors that can occur while generating `ironprint.json`.
+/// Errors that can occur while generating `fingerprint.json`.
 #[derive(Debug)]
-pub enum IronprintError {
+pub enum BuildTimeFingerprintError {
     /// `cargo metadata` process failed or returned non-zero.
     CargoMetadataFailed(String),
     /// `cargo metadata` stdout was not valid UTF-8.
@@ -82,7 +82,7 @@ pub enum IronprintError {
     SerializationFailed(String),
 }
 
-impl std::fmt::Display for IronprintError {
+impl std::fmt::Display for BuildTimeFingerprintError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CargoMetadataFailed(e)      => write!(f, "cargo metadata failed: {e}"),
@@ -95,15 +95,15 @@ impl std::fmt::Display for IronprintError {
     }
 }
 
-impl std::error::Error for IronprintError {}
+impl std::error::Error for BuildTimeFingerprintError {}
 
-impl From<std::io::Error> for IronprintError {
+impl From<std::io::Error> for BuildTimeFingerprintError {
     fn from(e: std::io::Error) -> Self { Self::IoError(e) }
 }
 
 // ─── public entry point ──────────────────────────────────────────────────────
 
-/// Generate `ironprint.json` in `$OUT_DIR`.
+/// Generate `fingerprint.json` in `$OUT_DIR`.
 ///
 /// All inputs are read from the environment variables that Cargo sets for
 /// `build.rs` scripts. The necessary `cargo:rerun-if-changed` directives are
@@ -115,11 +115,11 @@ impl From<std::io::Error> for IronprintError {
 ///
 /// ```rust,ignore
 /// fn main() {
-///     toolkit_zero::dependency_graph::build::generate_ironprint()
-///         .expect("ironprint generation failed");
+///     toolkit_zero::dependency_graph::build::generate_fingerprint()
+///         .expect("fingerprint generation failed");
 /// }
 /// ```
-pub fn generate_ironprint() -> Result<(), IronprintError> {
+pub fn generate_fingerprint() -> Result<(), BuildTimeFingerprintError> {
     // Emit rerun directives — cargo reads these from build script stdout
     // regardless of which function in the call stack prints them.
     println!("cargo:rerun-if-changed=src");
@@ -130,52 +130,52 @@ pub fn generate_ironprint() -> Result<(), IronprintError> {
 
     let fingerprint = build_fingerprint()?;
     let compact = serde_json::to_string(&fingerprint)
-        .map_err(|e| IronprintError::SerializationFailed(e.to_string()))?;
+        .map_err(|e| BuildTimeFingerprintError::SerializationFailed(e.to_string()))?;
 
-    fs::write(format!("{out_dir}/ironprint.json"), compact)?;
+    fs::write(format!("{out_dir}/fingerprint.json"), compact)?;
     Ok(())
 }
 
-/// Write a pretty-printed `ironprint.json` alongside the crate's `Cargo.toml`
+/// Write a pretty-printed `fingerprint.json` alongside the crate's `Cargo.toml`
 /// when `enabled` is `true`.
 ///
 /// This file is intended for **local inspection only**. It is distinct from
-/// the compact `ironprint.json` written to `$OUT_DIR`; the binary always
+/// the compact `fingerprint.json` written to `$OUT_DIR`; the binary always
 /// embeds the `$OUT_DIR` copy. Pass `false`, or condition the call on
 /// `cfg!(debug_assertions)`, to suppress the file in release builds.
 ///
 /// # Concerns
 ///
 /// The exported file contains the full dependency graph, per-file source
-/// hashes, target triple, and compiler version. **Add `ironprint.json` to
+/// hashes, target triple, and compiler version. **Add `fingerprint.json` to
 /// `.gitignore`** to prevent unintentional commits. If an error occurs and
 /// `enabled` is `true`, the file may be partially written; the error is
 /// propagated to the caller.
 ///
 /// ```rust,ignore
 /// fn main() {
-///     toolkit_zero::dependency_graph::build::generate_ironprint()
-///         .expect("ironprint generation failed");
+///     toolkit_zero::dependency_graph::build::generate_fingerprint()
+///         .expect("fingerprint generation failed");
 ///     toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
-///         .expect("ironprint export failed");
+///         .expect("fingerprint export failed");
 /// }
 /// ```
-pub fn export(enabled: bool) -> Result<(), IronprintError> {
+pub fn export(enabled: bool) -> Result<(), BuildTimeFingerprintError> {
     if !enabled { return Ok(()); }
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
 
     let fingerprint = build_fingerprint()?;
     let pretty = serde_json::to_string_pretty(&fingerprint)
-        .map_err(|e| IronprintError::SerializationFailed(e.to_string()))?;
+        .map_err(|e| BuildTimeFingerprintError::SerializationFailed(e.to_string()))?;
 
-    fs::write(format!("{manifest_dir}/ironprint.json"), pretty)?;
+    fs::write(format!("{manifest_dir}/fingerprint.json"), pretty)?;
     Ok(())
 }
 
-// ─── core fingerprint builder (shared by generate_ironprint + export) ─────────
+// ─── core fingerprint builder (shared by generate_fingerprint + export) ────────
 
-fn build_fingerprint() -> Result<Value, IronprintError> {
+fn build_fingerprint() -> Result<Value, BuildTimeFingerprintError> {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
 
     // ── 1. Package identity ───────────────────────────────────────────────────
@@ -216,18 +216,18 @@ fn build_fingerprint() -> Result<Value, IronprintError> {
             &format!("{manifest_dir}/Cargo.toml"),
         ])
         .output()
-        .map_err(|e| IronprintError::CargoMetadataFailed(e.to_string()))?;
+        .map_err(|e| BuildTimeFingerprintError::CargoMetadataFailed(e.to_string()))?;
 
     if !meta_out.status.success() {
         let err = String::from_utf8_lossy(&meta_out.stderr).to_string();
-        return Err(IronprintError::CargoMetadataFailed(err));
+        return Err(BuildTimeFingerprintError::CargoMetadataFailed(err));
     }
 
     let meta_str = String::from_utf8(meta_out.stdout)
-        .map_err(|_| IronprintError::CargoMetadataNotUtf8)?;
+        .map_err(|_| BuildTimeFingerprintError::CargoMetadataNotUtf8)?;
 
     let meta_raw: Value = serde_json::from_str(&meta_str)
-        .map_err(|e| IronprintError::CargoMetadataInvalidJson(e.to_string()))?;
+        .map_err(|e| BuildTimeFingerprintError::CargoMetadataInvalidJson(e.to_string()))?;
 
     let meta_clean      = strip_absolute_paths(meta_raw);
     let meta_normalised = normalise_json(meta_clean);
@@ -235,7 +235,7 @@ fn build_fingerprint() -> Result<Value, IronprintError> {
     // ── 5. Cargo.lock SHA-256 ─────────────────────────────────────────────────
     let lock_path = format!("{manifest_dir}/Cargo.lock");
     if !Path::new(&lock_path).exists() {
-        return Err(IronprintError::CargoLockNotFound(lock_path));
+        return Err(BuildTimeFingerprintError::CargoLockNotFound(lock_path));
     }
     let lock_raw = fs::read(&lock_path)?;
     let lock_stripped: Vec<u8> = lock_raw
@@ -373,7 +373,7 @@ fn hex_sha256(data: &[u8]) -> String {
 fn hash_source_tree(
     src_dir:      &str,
     manifest_dir: &str,
-) -> Result<BTreeMap<String, String>, IronprintError> {
+) -> Result<BTreeMap<String, String>, BuildTimeFingerprintError> {
     let mut map = BTreeMap::new();
     visit_rs_files(Path::new(src_dir), Path::new(manifest_dir), &mut map)?;
     Ok(map)
@@ -383,7 +383,7 @@ fn visit_rs_files(
     dir:  &Path,
     base: &Path,
     map:  &mut BTreeMap<String, String>,
-) -> Result<(), IronprintError> {
+) -> Result<(), BuildTimeFingerprintError> {
     if !dir.exists() {
         return Ok(());
     }

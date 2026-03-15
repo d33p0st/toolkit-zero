@@ -1,6 +1,6 @@
 [package]
 name = "toolkit-zero-macros"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Soumyo Deep Gupta <deep.main.ac@gmail.com>"]
@@ -21,6 +21,13 @@ maintenance = { status = "actively-developed" }
 default = []
 socket-server = []
 socket-client = []
+serialization = []
+location-browser = []
+enc-timelock-keygen-now         = []
+enc-timelock-keygen-input       = []
+enc-timelock-async-keygen-now   = []
+enc-timelock-async-keygen-input = []
+dep-graph-capture               = []
 
 [lib]
 proc-macro = true
