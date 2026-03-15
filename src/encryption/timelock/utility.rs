@@ -1,13 +1,13 @@
 use super::{TimeLockCadence, TimeLockSalts, KdfParams, TimePrecision, TimeFormat};
 
-/// Compact, self-contained header encoding of **all** encryption-time settings
-/// — suitable for plaintext storage in a ciphertext header.
+/// Compact, self-contained encoding of **all** encryption-time settings —
+/// suitable for plaintext storage within a ciphertext header.
 ///
-/// Produced by [`pack`] and passed to [`timelock`](super::timelock) /
+/// Produced by [`pack`] and supplied to [`timelock`](super::timelock) or
 /// [`timelock_async`](super::timelock_async) as `params: Some(header)` on the
-/// **decryption side**.  The cadence variant discriminant is stored (not the
-/// actual day/weekday/month values), which the decryption side reads from the
-/// live system clock.
+/// **decryption side**. Only the cadence variant discriminant is recorded; the
+/// actual calendar values (weekday, day-of-month, month) are not stored and
+/// are instead read from the live system clock during decryption.
 ///
 /// | Field              | Encoding / Notes                                          |
 /// |--------------------|-----------------------------------------------------------|
@@ -43,10 +43,10 @@ pub struct TimeLockParams {
     pub kdf_params: KdfParams,
 }
 
-/// Pack [`TimePrecision`], [`TimeFormat`], and a [`TimeLockCadence`] reference
-/// into a compact [`TimeLockParams`] for ciphertext header storage.
+/// Encode [`TimePrecision`], [`TimeFormat`], and a [`TimeLockCadence`] reference
+/// into a compact [`TimeLockParams`] for storage in a ciphertext header.
 ///
-/// Only the **variant identity** of `cadence` is recorded — the actual day,
+/// Only the **variant discriminant** of `cadence` is recorded; the actual day,
 /// weekday, or month values are intentionally discarded.
 ///
 /// # Example
@@ -84,13 +84,13 @@ pub fn pack(
     TimeLockParams { time_precision: tp, time_format: tf, cadence_variant: cadence.variant_id(), salts, kdf_params }
 }
 
-/// Unpack a [`TimeLockParams`] into its constituent [`TimePrecision`],
+/// Decode a [`TimeLockParams`] into its constituent [`TimePrecision`],
 /// [`TimeFormat`], and raw cadence variant discriminant.
 ///
 /// The returned `u8` maps as follows:
-/// `0`=None, `1`=DayOfWeek, `2`=DayOfMonth, `3`=MonthOfYear,
-/// `4`=DayOfWeekInMonth, `5`=DayOfMonthInMonth, `6`=DayOfWeekAndDayOfMonth.
-/// Any unrecognised value is treated as `0` (None).
+/// `0` = None, `1` = DayOfWeek, `2` = DayOfMonth, `3` = MonthOfYear,
+/// `4` = DayOfWeekInMonth, `5` = DayOfMonthInMonth, `6` = DayOfWeekAndDayOfMonth.
+/// Any unrecognised value defaults to `0` (None).
 ///
 /// # Example
 ///

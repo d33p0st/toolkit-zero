@@ -1,35 +1,35 @@
 //! Time-locked key derivation.
 //!
-//! Derives a deterministic 32-byte key from a **time value** using a
+//! Derives a deterministic 32-byte key from a **time value** through a
 //! three-pass heterogeneous KDF chain:
 //!
 //! | Pass | Algorithm | Role |
 //! |------|-----------|------|
-//! | 1 | **Argon2id** | PHC winner; sequential + random-access memory-hard; GPU/ASIC resistant |
-//! | 2 | **scrypt**   | Independently designed memory-hard function (ROMix); orthogonal to Argon2 |
-//! | 3 | **Argon2id** | Deepens the chain; fresh parameters and a distinct salt |
+//! | 1 | **Argon2id** | PHC winner; sequential- and random-access memory-hard; GPU/ASIC-resistant |
+//! | 2 | **scrypt**   | Independently designed memory-hard function (ROMix); orthogonal to Argon2id |
+//! | 3 | **Argon2id** | Extends the chain depth with fresh parameters and a distinct salt |
 //!
-//! Using two *independently designed* memory-hard functions means the chain
-//! remains strong even if a weakness is discovered in one of them.
-//! Every intermediate output is zeroized from memory before the next pass
-//! begins.
+//! Using two *independently designed* memory-hard functions ensures the chain
+//! remains strong even if a weakness is discovered in either algorithm.
+//! Every intermediate KDF output is zeroized from memory before the subsequent
+//! pass begins.
 //!
 //! # Two entry points
 //!
-//! | `params` argument                   | Path              | Intended use                                                |
-//! |-------------------------------------|-------------------|-------------------------------------------------------------|
-//! | `params: None` (+ all other `Some`) | `_at` encryption  | Caller supplies cadence, time, precision, format, salts, KDF |
-//! | `params: Some(p)` (rest `None`)     | `_now` decryption | All settings read from [`TimeLockParams`]; no user input    |
+//! | `params` argument                   | Path                | Intended use                                                         |
+//! |-------------------------------------|---------------------|----------------------------------------------------------------------|
+//! | `params: None` (+ all other `Some`) | `_at` — encryption  | Caller supplies cadence, time, precision, format, salts, and KDF parameters |
+//! | `params: Some(p)` (rest `None`)     | `_now` — decryption | All settings are read from [`TimeLockParams`]; no additional input required |
 //!
-//! Async counterparts ([`timelock_async`]) are available with the
-//! `enc-timelock-async-keygen-now` / `enc-timelock-async-keygen-input` features
-//! and offload the blocking KDF work to a dedicated thread so the calling
-//! future's executor is never stalled.
+//! Async counterparts ([`timelock_async`]) are provided under the
+//! `enc-timelock-async-keygen-now` and `enc-timelock-async-keygen-input` features;
+//! they offload blocking KDF work to a dedicated thread, ensuring the calling
+//! executor is never stalled.
 //!
 //! # Time input
 //!
-//! The raw KDF input is a short ASCII string constructed from the time value
-//! at one of three precision levels.
+//! The KDF input is a short ASCII string derived from the time value at one
+//! of three selectable precision levels.
 //!
 //! | [`TimePrecision`] | [`TimeFormat`] | Example string | Window   | Candidates/day |
 //! |-------------------|----------------|----------------|----------|----------------|
@@ -44,24 +44,24 @@
 //! > making the derived key valid twice per day.  Use `Hour24` for a key
 //! > that is uniquely valid once per day.
 //!
-//! > **Clock-drift (`Minute` precision)**: if both parties' clocks may
-//! > differ by up to one minute, call `derive_key_now` three times with
-//! > `now()-1min`, `now()`, and `now()+1min` at the call site and try each
-//! > key.  The extra cost is negligible compared to one full KDF pass.
+//! > **Clock skew (`Minute` precision):** if both parties' clocks may diverge
+//! > by up to one minute, derive keys for `now() − 1 min`, `now()`, and
+//! > `now() + 1 min` and try each in turn. The additional cost is negligible
+//! > relative to a single full KDF pass.
 //!
 //! # Salts
 //!
-//! [`TimeLockSalts`] holds three independent 32-byte values — one per KDF
-//! pass — generated at encryption time via [`TimeLockSalts::generate`].
+//! [`TimeLockSalts`] holds three independent 32-byte random values — one per
+//! KDF pass — generated at encryption time via [`TimeLockSalts::generate`].
 //! Salts are **not secret**; they prevent precomputation attacks and must be
-//! stored in plaintext alongside the ciphertext header.  Supply the identical
-//! salts to `derive_key_*` at decryption time.
+//! stored in plaintext alongside the ciphertext header. The identical salts
+//! must be provided to the decryption call.
 //!
 //! # Memory safety
 //!
 //! All intermediate KDF outputs are wrapped in [`Zeroizing`] and overwritten
-//! when dropped.  [`TimeLockKey`] implements [`ZeroizeOnDrop`] so the final
-//! 32-byte key is scrubbed the moment it goes out of scope.
+//! upon being dropped. [`TimeLockKey`] implements [`ZeroizeOnDrop`]; the final
+//! 32-byte key material is scrubbed from memory the moment it goes out of scope.
 //!
 //! # Quick start
 //!
@@ -114,35 +114,38 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // ─── time precision / format ──────────────────────────────────────────────────
 
-/// How finely time is quantized when constructing the KDF input string.
+/// The granularity at which the time value is quantised when constructing the
+/// KDF input string.
 ///
-/// Coarser precision gives a longer validity window (easier for the legitimate
-/// user to hit); finer precision raises the cost of time-sweeping attacks.
+/// Coarser precision yields a longer validity window, making it easier for a
+/// legitimate user to produce the correct key; finer precision increases the
+/// cost of time-sweeping attacks.
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimePrecision {
-    /// Quantize to the current **hour**.
+    /// Quantise to the current **hour**.
     ///
-    /// Input example: `"14"` (24 h) | `"02PM"` (12 h)  
-    /// Valid for the entire 60-minute block.
+    /// Input example: `"14"` (24-hour) | `"02PM"` (12-hour).  
+    /// The derived key is valid for the entire 60-minute block.
     Hour,
 
-    /// Quantize to the current **15-minute block** (minute snapped to
+    /// Quantise to the current **15-minute block** (minute snapped to
     /// 00, 15, 30, or 45).
     ///
-    /// Input example: `"14:30"` (24 h) | `"02:30PM"` (12 h)  
-    /// Valid for the 15-minute interval containing the chosen minute.
+    /// Input example: `"14:30"` (24-hour) | `"02:30PM"` (12-hour).  
+    /// The derived key is valid for the 15-minute interval enclosing the
+    /// chosen minute.
     Quarter,
 
-    /// Quantize to the current **minute** (1-minute window).
+    /// Quantise to the current **minute** (1-minute validity window).
     ///
-    /// Input example: `"14:37"` (24 h) | `"02:37PM"` (12 h)  
-    /// Strongest temporal constraint — ensure both parties' clocks are NTP
-    /// synchronised to within ±30 s.
+    /// Input example: `"14:37"` (24-hour) | `"02:37PM"` (12-hour).  
+    /// The strongest temporal constraint available — both parties' clocks must
+    /// be NTP-synchronised to within ±30 seconds.
     Minute,
 }
 
-/// Clock representation used to format the time input string.
+/// Clock representation used when formatting the time input string.
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeFormat {
@@ -156,10 +159,10 @@ pub enum TimeFormat {
 
 // ─── schedule cadence ────────────────────────────────────────────────────────
 
-/// Day of the week, Monday-based (Mon = 0 … Sun = 6).
+/// Day of the week, Monday-indexed (Mon = 0 … Sun = 6).
 ///
-/// Used as a component of [`TimeLockCadence`] to bind key derivation to a
-/// specific weekday.
+/// Used as a cadence component in [`TimeLockCadence`] to constrain key
+/// derivation to a specific weekday.
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Weekday {
@@ -215,10 +218,10 @@ impl Weekday {
     }
 }
 
-/// Month of the year (January = 1 … December = 12).
+/// Calendar month (January = 1 … December = 12).
 ///
-/// Used as a component of [`TimeLockCadence`] to bind key derivation to a
-/// specific calendar month.
+/// Used as a cadence component in [`TimeLockCadence`] to constrain key
+/// derivation to a specific month of the year.
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Month {
@@ -274,10 +277,10 @@ impl Month {
         }
     }
 
-    /// Maximum number of days in this month.
+    /// Maximum day count for this month.
     ///
-    /// February = 28 (leap years are intentionally ignored — the cadence
-    /// policy is meant to be stable across years).
+    /// February is defined as 28 days; leap years are intentionally not
+    /// accounted for to keep the cadence policy stable across years.
     pub fn max_days(self) -> u8 {
         match self {
             Self::February => 28,
@@ -311,27 +314,28 @@ impl Month {
     }
 }
 
-/// Cadence component of a scheduled time-lock — binds key derivation to a
-/// recurring calendar pattern **in addition to** the time-of-day constraint.
+/// Calendar cadence for a scheduled time-lock — constrains key derivation to
+/// a recurring calendar pattern **in addition to** the time-of-day window.
 ///
-/// Pair with a [`TimeLockTime`] (encryption path) to express policies like:
+/// Combine with a [`TimeLockTime`] on the encryption path to express policies
+/// such as:
 ///
-/// - *"only on Tuesdays at 18:00"* — `DayOfWeek(Weekday::Tuesday)` + 18h
-/// - *"only on the 1st at 00:00"* — `DayOfMonth(1)` + 0h
-/// - *"every Tuesday in February at 06:00"* — `DayOfWeekInMonth(Weekday::Tuesday, Month::February)` + 6h
+/// - *"valid only on Tuesdays at 18:00"* — `DayOfWeek(Weekday::Tuesday)` + 18 h
+/// - *"valid only on the 1st of each month at 00:00"* — `DayOfMonth(1)` + 0 h
+/// - *"valid only on Tuesdays in February at 06:00"* — `DayOfWeekInMonth(Weekday::Tuesday, Month::February)` + 6 h
 ///
-/// On the decryption side, pass [`pack`] the cadence (along with precision
-/// and format) to obtain a [`TimeLockParams`] to store in the ciphertext
-/// header, then call [`derive_key_scheduled_now`] with those params.
+/// On the decryption side, pass the cadence to [`pack`] (along with precision
+/// and format) to obtain a [`TimeLockParams`] for storage in the ciphertext
+/// header.
 ///
-/// `TimeLockCadence::None` is equivalent to a plain [`derive_key_at`] call —
-/// no calendar dimension is mixed into the KDF input.
+/// `TimeLockCadence::None` is equivalent to a call without any calendar
+/// constraint — no calendar dimension is incorporated into the KDF input.
 ///
 /// # Panics
 ///
 /// Constructing [`DayOfMonthInMonth`](TimeLockCadence::DayOfMonthInMonth) is
 /// always valid, but **key derivation panics** if the stored day exceeds the
-/// month's maximum (e.g. day 29 for February, day 31 for April).
+/// month's maximum (for example, day 29 for February or day 31 for April).
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeLockCadence {
