@@ -510,6 +510,7 @@
 //! | socket (client) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
 //! | location | [`location::backend_deps`] | `tokio`, `serde`, `webbrowser`, `rand` |
 //! | encryption (timelock) | [`encryption::timelock::backend_deps`] | `argon2`, `scrypt`, `zeroize`, `chrono`, `rand`; `tokio` (async variants only) |
+//! | dependency_graph | [`dependency_graph::backend_deps`] | `serde_json`; `sha2` (build side only) |
 //!
 //! Enabling `backend-deps` without any other feature compiles successfully but
 //! exposes no symbols; every re-export within `backend_deps` is individually

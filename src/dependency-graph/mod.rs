@@ -25,3 +25,6 @@ pub mod build;
 
 #[cfg(feature = "dependency-graph-capture")]
 pub mod capture;
+
+#[cfg(feature = "backend-deps")]
+pub mod backend_deps;

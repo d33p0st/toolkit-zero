@@ -1,5 +1,7 @@
 # toolkit-zero
 
+[![Crates.io](https://img.shields.io/crates/v/toolkit-zero.svg)](https://crates.io/crates/toolkit-zero)
+
 A feature-selective Rust utility crate. Declare only the modules your project requires via Cargo feature flags; each feature compiles exclusively the code it depends on, with no extraneous overhead.
 
 ---
@@ -103,38 +105,35 @@ A feature-selective Rust utility crate. Declare only the modules your project re
 | `dependency-graph-capture` | Read the embedded snapshot at runtime | `toolkit_zero::dependency_graph::capture` |
 | `backend-deps` | Re-exports all third-party deps used by each active module | `*::backend_deps` |
 
-Add to `Cargo.toml`:
+Add with `cargo add`:
 
-```toml
-[dependencies]
+```sh
 # VEIL cipher only
-toolkit-zero = { version = "3.3", features = ["serialization"] }
+cargo add toolkit-zero --features serialization
 
 # HTTP server only
-toolkit-zero = { version = "3.3", features = ["socket-server"] }
+cargo add toolkit-zero --features socket-server
 
 # HTTP client only
-toolkit-zero = { version = "3.3", features = ["socket-client"] }
+cargo add toolkit-zero --features socket-client
 
 # Both sides
-toolkit-zero = { version = "3.3", features = ["socket"] }
+cargo add toolkit-zero --features socket
 
 # Geolocation (pulls in socket-server automatically)
-toolkit-zero = { version = "3.3", features = ["location"] }
+cargo add toolkit-zero --features location
 
 # Full time-lock encryption suite
-toolkit-zero = { version = "3.3", features = ["encryption"] }
+cargo add toolkit-zero --features encryption
 
 # Attach IronPrint fingerprint in build.rs
-# [build-dependencies]
-toolkit-zero = { version = "3.3", features = ["dependency-graph-build"] }
+cargo add toolkit-zero --build --features dependency-graph-build
 
 # Read IronPrint fingerprint at runtime
-# [dependencies]
-toolkit-zero = { version = "3.3", features = ["dependency-graph-capture"] }
+cargo add toolkit-zero --features dependency-graph-capture
 
 # Re-export deps alongside socket-server
-toolkit-zero = { version = "3.3", features = ["socket-server", "backend-deps"] }
+cargo add toolkit-zero --features socket-server,backend-deps
 ```
 
 ---
@@ -905,10 +904,10 @@ The two features are intentionally independent so that each can be declared in t
 
 ```toml
 [dependencies]
-toolkit-zero = { version = "3.3", features = ["dependency-graph-capture"] }
+toolkit-zero = { features = ["dependency-graph-capture"] }
 
 [build-dependencies]
-toolkit-zero = { version = "3.3", features = ["dependency-graph-build"] }
+toolkit-zero = { features = ["dependency-graph-build"] }
 ```
 
 `build.rs`:
@@ -1007,12 +1006,13 @@ When combined with any other feature, `backend-deps` appends a `backend_deps` su
 | `socket` (client side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
 | `location` | `toolkit_zero::location::backend_deps` | `tokio`, `serde`, `webbrowser`, `rand` |
 | `encryption` (timelock) | `toolkit_zero::encryption::timelock::backend_deps` | `argon2`, `scrypt`, `zeroize`, `chrono`, `rand`; `tokio` (async variants only) |
+| `dependency_graph` | `toolkit_zero::dependency_graph::backend_deps` | `serde_json`; `sha2` (build side only) |
 
 Each re-export is individually gated on its parent feature; only the dependencies that are currently compiled appear in `backend_deps`. Enabling `backend-deps` without any other feature compiles successfully but exposes no symbols.
 
 ```toml
 # Example: socket-server + dep re-exports
-toolkit-zero = { version = "3.3", features = ["socket-server", "backend-deps"] }
+toolkit-zero = { features = ["socket-server", "backend-deps"] }
 ```
 
 Then in your code:
