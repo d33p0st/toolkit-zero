@@ -263,6 +263,48 @@
 //! The body or query parameters are sealed before the wire send; the response is
 //! opened automatically.
 //!
+//! ### `#[request]` attribute macro
+//!
+//! The [`socket::client::request`] attribute macro is a concise alternative to
+//! the builder calls above. It replaces the decorated `fn` in-place with a `let`
+//! binding that performs the HTTP request. The **function name** becomes the
+//! binding name; the **return type** becomes `R` in the `.send::<R>()` turbofish.
+//! The function body is discarded. A return type annotation is **required**.
+//!
+//! All five builder modes are supported: plain, `json`, `query`, `encrypted`,
+//! and `encrypted_query`. Each mode accepts either `async` (`.send::<R>().await?`)
+//! or `sync` (`.send_sync::<R>()?`).
+//!
+//! ```rust,ignore
+//! use toolkit_zero::socket::client::{Client, Target, request};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Deserialize, Serialize, Clone)]
+//! struct Item { id: u32, name: String }
+//!
+//! #[derive(Serialize)]
+//! struct NewItem { name: String }
+//!
+//! # async fn run() -> Result<(), reqwest::Error> {
+//! let client = Client::new_async(Target::Localhost(8080));
+//!
+//! // Plain async GET
+//! #[request(client, GET, "/items", async)]
+//! async fn items() -> Vec<Item> {}
+//!
+//! // POST with JSON body
+//! #[request(client, POST, "/items", json(NewItem { name: "widget".into() }), async)]
+//! async fn created() -> Item {}
+//!
+//! // Synchronous DELETE
+//! #[request(client, DELETE, "/items/1", sync)]
+//! fn deleted() -> Item {}
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See [`socket::client::request`] for the full syntax reference.
+//!
 //! ---
 //!
 //! ## Location

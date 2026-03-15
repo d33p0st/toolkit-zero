@@ -1,10 +1,10 @@
 [package]
 name = "toolkit-zero-macros"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Soumyo Deep Gupta <deep.main.ac@gmail.com>"]
-description = "Procedural macros for toolkit-zero — provides the #[mechanism] attribute for concise socket-server route declaration."
+description = "Procedural macros for toolkit-zero"
 license = "MIT"
 repository = "https://github.com/d33p0st/toolkit-zero.git"
 homepage = "https://d33p0st.github.io/toolkit-zero/"
@@ -16,6 +16,11 @@ exclude = ["target/", "*.d"]
 
 [badges]
 maintenance = { status = "actively-developed" }
+
+[features]
+default = []
+socket-server = []
+socket-client = []
 
 [lib]
 proc-macro = true
