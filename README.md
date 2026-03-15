@@ -7,45 +7,72 @@ A feature-selective Rust utility crate. Declare only the modules your project re
 <details>
 <summary>Table of Contents</summary>
 
-1. [Overview](#overview)
-2. [Feature flags](#feature-flags)
-3. [Serialization](#serialization)
-4. [Socket — server](#socket--server)
-   - [Plain routes](#plain-routes)
-   - [JSON body routes](#json-body-routes)
-   - [Query parameter routes](#query-parameter-routes)
-   - [Shared state](#shared-state)
-   - [Combining state with body / query](#combining-state-with-body--query)
-   - [VEIL-encrypted routes](#veil-encrypted-routes)
-   - [Serving the server](#serving-the-server)
-   - [Graceful shutdown](#graceful-shutdown)
-   - [Building responses](#building-responses)
-   - [Sync handlers](#sync-handlers)
-   - [`#[mechanism]` attribute macro](#mechanism-attribute-macro)
-5. [Socket — client](#socket--client)
-   - [Creating a client](#creating-a-client)
-   - [Plain requests](#plain-requests)
-   - [JSON body requests](#json-body-requests)
-   - [Query parameter requests](#query-parameter-requests)
-   - [VEIL-encrypted requests](#veil-encrypted-requests)
-   - [Sync vs async sends](#sync-vs-async-sends)
-   - [`#[request]` attribute macro](#request-attribute-macro)
-6. [Location](#location)
-   - [Blocking usage](#blocking-usage)
-   - [Async usage](#async-usage)
-   - [Page templates](#page-templates)
-   - [LocationData fields](#locationdata-fields)
-   - [Errors](#locationerror-variants)
-7. [Encryption — Timelock](#encryption--timelock)
-   - [Features](#timelock-features)
-   - [KDF presets](#kdf-presets)
-   - [Usage](#timelock-usage)
-8. [Dependency Graph — IronPrint](#dependency-graph--ironprint)
-   - [Sections captured](#sections-captured)
-   - [Setup](#setup)
-   - [Usage](#ironprint-usage)
-   - [Debug export](#debug-export)
-   - [Risks and considerations](#risks-and-considerations)
+1\. [Overview](#overview)
+
+2\. [Feature flags](#feature-flags)
+
+3\. [Serialization](#serialization)
+
+<details>
+<summary>4. <a href="#socket--server">Socket — server</a></summary>
+
+- [Plain routes](#plain-routes)
+- [JSON body routes](#json-body-routes)
+- [Query parameter routes](#query-parameter-routes)
+- [Shared state](#shared-state)
+- [Combining state with body / query](#combining-state-with-body--query)
+- [VEIL-encrypted routes](#veil-encrypted-routes)
+- [Serving the server](#serving-the-server)
+- [Graceful shutdown](#graceful-shutdown)
+- [Building responses](#building-responses)
+- [Sync handlers](#sync-handlers)
+- [`#[mechanism]` attribute macro](#mechanism-attribute-macro)
+
+</details>
+
+<details>
+<summary>5. <a href="#socket--client">Socket — client</a></summary>
+
+- [Creating a client](#creating-a-client)
+- [Plain requests](#plain-requests)
+- [JSON body requests](#json-body-requests)
+- [Query parameter requests](#query-parameter-requests)
+- [VEIL-encrypted requests](#veil-encrypted-requests)
+- [Sync vs async sends](#sync-vs-async-sends)
+- [`#[request]` attribute macro](#request-attribute-macro)
+
+</details>
+
+<details>
+<summary>6. <a href="#location">Location</a></summary>
+
+- [Blocking usage](#blocking-usage)
+- [Async usage](#async-usage)
+- [Page templates](#page-templates)
+- [LocationData fields](#locationdata-fields)
+- [Errors](#locationerror-variants)
+
+</details>
+
+<details>
+<summary>7. <a href="#encryption--timelock">Encryption — Timelock</a></summary>
+
+- [Features](#timelock-features)
+- [KDF presets](#kdf-presets)
+- [Usage](#timelock-usage)
+
+</details>
+
+<details>
+<summary>8. <a href="#dependency-graph--ironprint">Dependency Graph — IronPrint</a></summary>
+
+- [Sections captured](#sections-captured)
+- [Setup](#setup)
+- [Usage](#ironprint-usage)
+- [Debug export](#debug-export)
+- [Risks and considerations](#risks-and-considerations)
+
+</details>
 
 </details>
 
