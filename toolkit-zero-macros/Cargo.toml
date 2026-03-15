@@ -1,0 +1,26 @@
+[package]
+name = "toolkit-zero-macros"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Soumyo Deep Gupta <deep.main.ac@gmail.com>"]
+description = "Procedural macros for toolkit-zero — provides the #[mechanism] attribute for concise socket-server route declaration."
+license = "MIT"
+repository = "https://github.com/d33p0st/toolkit-zero.git"
+homepage = "https://d33p0st.github.io/toolkit-zero/"
+documentation = "https://docs.rs/toolkit-zero-macros"
+readme = "README.md"
+keywords = ["macro", "proc-macro", "socket", "http", "toolkit-zero"]
+categories = ["network-programming", "web-programming", "development-tools"]
+exclude = ["target/", "*.d"]
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn   = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
