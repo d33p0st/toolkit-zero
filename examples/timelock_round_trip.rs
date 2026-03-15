@@ -1,10 +1,10 @@
 //! Full encrypt → store-header → decrypt round-trip using the timelock API.
 //!
 //! Demonstrates:
-//!   - Deriving an encryption key from an explicit time (`params = None` → `_at` path)
+//!   - Building a [`TimelockBuilder`] for the encryption path (`::encrypt()`)
 //!   - Packing all settings (precision, format, cadence, salts, KDF params) into a
 //!     self-contained [`TimeLockParams`] header for plaintext storage in the ciphertext
-//!   - Re-deriving the key from the live system clock (`params = Some(header)` → `_now` path)
+//!   - Re-deriving the key from the live system clock with [`TimelockBuilder::decrypt`]
 //!
 //! Run with:
 //! ```sh
@@ -16,7 +16,7 @@
 //! within the same minute as the lock-time will succeed.
 
 use toolkit_zero::encryption::timelock::{
-    timelock, pack,
+    TimelockBuilder, pack,
     TimeLockCadence, TimeLockSalts, TimeLockTime,
     TimePrecision, TimeFormat, KdfPreset, Weekday,
 };
@@ -36,16 +36,15 @@ fn main() {
     let lock_time = TimeLockTime::new(18, 0).unwrap();
 
     println!("Deriving encryption key (this may take a few seconds)…");
-    let enc_key = timelock(
-        Some(cadence.clone()),
-        Some(lock_time),
-        Some(TimePrecision::Hour),
-        Some(TimeFormat::Hour24),
-        Some(salts.clone()),
-        Some(kdf),
-        None,   // params = None → _at (encryption) path
-    )
-    .expect("encryption-side key derivation failed");
+    let enc_key = TimelockBuilder::encrypt()
+        .cadence(cadence.clone())
+        .time(lock_time)
+        .precision(TimePrecision::Hour)
+        .format(TimeFormat::Hour24)
+        .salts(salts.clone())
+        .kdf(kdf)
+        .derive()
+        .expect("encryption-side key derivation failed");
 
     println!("enc_key[:8] = {:02x?}", &enc_key.as_bytes()[..8]);
 
@@ -60,14 +59,12 @@ fn main() {
     );
 
     // ── Decryption side ───────────────────────────────────────────────────────
-    // Load `header` from the ciphertext and call timelock() at the matching
-    // time slot with params = Some(header).
+    // Load `header` from the ciphertext and call TimelockBuilder::decrypt at the
+    // matching time slot.  All settings are read from the header automatically.
     println!("Deriving decryption key from system clock…");
-    let dec_key = timelock(
-        None, None, None, None, None, None,
-        Some(header),   // params = Some → _now (decryption) path
-    )
-    .expect("decryption-side key derivation failed");
+    let dec_key = TimelockBuilder::decrypt(header)
+        .derive()
+        .expect("decryption-side key derivation failed");
 
     println!("dec_key[:8] = {:02x?}", &dec_key.as_bytes()[..8]);
 

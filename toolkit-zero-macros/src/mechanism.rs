@@ -238,7 +238,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        // ── VEIL-encrypted body, no state ─────────────────────────────────
+        // ── Encrypted body, no state ──────────────────────────────────────
         (None, BodyMode::Encrypted(key_expr)) => {
             if params.is_empty() {
                 bail!(
@@ -257,7 +257,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        // ── VEIL-encrypted query, no state ────────────────────────────────
+        // ── Encrypted query, no state ─────────────────────────────────────
         (None, BodyMode::EncryptedQuery(key_expr)) => {
             if params.is_empty() {
                 bail!(
@@ -343,7 +343,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        // ── State + VEIL-encrypted body ───────────────────────────────────
+        // ── State + encrypted body ─────────────────────────────────────────
         (Some(state_expr), BodyMode::Encrypted(key_expr)) => {
             if params.len() < 2 {
                 bail!(
@@ -367,7 +367,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        // ── State + VEIL-encrypted query ──────────────────────────────────
+        // ── State + encrypted query ────────────────────────────────────────
         (Some(state_expr), BodyMode::EncryptedQuery(key_expr)) => {
             if params.len() < 2 {
                 bail!(

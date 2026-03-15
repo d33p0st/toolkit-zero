@@ -8,8 +8,8 @@
 //!
 //! | Function | Description |
 //! |---|---|
-//! | [`generate_fingerprint`] | Always call this. Writes compact `fingerprint.json` to `$OUT_DIR` and emits `cargo:rerun-if-changed` directives. |
-//! | [`export`] | Optional. Writes a pretty-printed `fingerprint.json` alongside `Cargo.toml` for local inspection. Pass `false` or condition on `cfg!(debug_assertions)` to suppress in release builds. |
+//! | [`generate_fingerprint`] | Always call this. Writes compact `fingerprint.json` to `$OUT_DIR` and emits `cargo:rerun-if-changed` directives. Pass `true` to also export a pretty-printed copy alongside `Cargo.toml`. |
+//! | [`export`] | Optional standalone export. Writes a pretty-printed `fingerprint.json` alongside `Cargo.toml`. Note: incurs a second `cargo metadata` call if used after `generate_fingerprint(false)`. |
 //!
 //! ## Sections captured
 //!
@@ -27,11 +27,9 @@
 //!
 //! ```rust,ignore
 //! fn main() {
-//!     toolkit_zero::dependency_graph::build::generate_fingerprint()
+//!     // Pass `true` to also write a pretty-printed copy alongside Cargo.toml.
+//!     toolkit_zero::dependency_graph::build::generate_fingerprint(cfg!(debug_assertions))
 //!         .expect("fingerprint generation failed");
-//!     // optional — pretty-print alongside Cargo.toml for local inspection
-//!     toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
-//!         .expect("fingerprint export failed");
 //! }
 //! ```
 //!
@@ -46,8 +44,9 @@
 //! * **Not tamper-proof** — the fingerprint resides as plain text in the binary's
 //!   read-only data section. It is informational in nature; it does not constitute
 //!   a security boundary.
-//! * **Export file** — `export(true)` writes `fingerprint.json` to the crate root.
-//!   Add it to `.gitignore` to prevent unintentional commits.
+//! * **Export file** — `generate_fingerprint(true)` (or `export(true)`) writes
+//!   `fingerprint.json` to the crate root. Add it to `.gitignore` to prevent
+//!   unintentional commits.
 //! * **Build-time overhead** — `cargo metadata` is executed on every rebuild.
 //!   The `cargo:rerun-if-changed` directives restrict this to changes in `src/`,
 //!   `Cargo.toml`, or `Cargo.lock`.
@@ -57,6 +56,8 @@
 //! * **Feature scope** — `build.features` captures the active features of the
 //!   crate being built, not toolkit-zero's own features.
 //! * **Compile-time only** — the snapshot does not update at runtime.
+//! * **Atomic writes** — both fingerprint files are written via a `.tmp` rename
+//!   so a partially-written file is never observed by a parallel reader.
 
 use std::{collections::BTreeMap, env, fs, path::Path, process::Command};
 
@@ -110,29 +111,43 @@ impl From<std::io::Error> for BuildTimeFingerprintError {
 /// emitted automatically; no additional boilerplate is required in the
 /// calling `build.rs`.
 ///
-/// To obtain a pretty-printed copy alongside `Cargo.toml` for local
-/// inspection, also call [`export`]`(true)`.
+/// If `export` is `true`, a pretty-printed copy is also written alongside
+/// `Cargo.toml` for local inspection. Both writes are **atomic** (written to a
+/// `.tmp` file then renamed), so a partially-written file is never observed.
+/// Only a single `cargo metadata` call is made regardless of the `export` flag.
+///
+/// Pass `cfg!(debug_assertions)` to export only in debug builds:
 ///
 /// ```rust,ignore
 /// fn main() {
-///     toolkit_zero::dependency_graph::build::generate_fingerprint()
+///     toolkit_zero::dependency_graph::build::generate_fingerprint(cfg!(debug_assertions))
 ///         .expect("fingerprint generation failed");
 /// }
 /// ```
-pub fn generate_fingerprint() -> Result<(), BuildTimeFingerprintError> {
+pub fn generate_fingerprint(export: bool) -> Result<(), BuildTimeFingerprintError> {
     // Emit rerun directives — cargo reads these from build script stdout
     // regardless of which function in the call stack prints them.
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
 
-    let out_dir = env::var("OUT_DIR").unwrap_or_default();
+    let out_dir      = env::var("OUT_DIR").unwrap_or_default();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
 
+    // Build the fingerprint once — shared by both the compact and pretty copies.
     let fingerprint = build_fingerprint()?;
+
     let compact = serde_json::to_string(&fingerprint)
         .map_err(|e| BuildTimeFingerprintError::SerializationFailed(e.to_string()))?;
 
-    fs::write(format!("{out_dir}/fingerprint.json"), compact)?;
+    write_atomic(&format!("{out_dir}/fingerprint.json"), compact.as_bytes())?;
+
+    if export {
+        let pretty = serde_json::to_string_pretty(&fingerprint)
+            .map_err(|e| BuildTimeFingerprintError::SerializationFailed(e.to_string()))?;
+        write_atomic(&format!("{manifest_dir}/fingerprint.json"), pretty.as_bytes())?;
+    }
+
     Ok(())
 }
 
@@ -141,20 +156,22 @@ pub fn generate_fingerprint() -> Result<(), BuildTimeFingerprintError> {
 ///
 /// This file is intended for **local inspection only**. It is distinct from
 /// the compact `fingerprint.json` written to `$OUT_DIR`; the binary always
-/// embeds the `$OUT_DIR` copy. Pass `false`, or condition the call on
-/// `cfg!(debug_assertions)`, to suppress the file in release builds.
+/// embeds the `$OUT_DIR` copy.
+///
+/// > **Tip:** prefer passing `true` to [`generate_fingerprint`] instead of
+/// > calling both functions, as `generate_fingerprint(true)` only runs
+/// > `cargo metadata` once.
 ///
 /// # Concerns
 ///
 /// The exported file contains the full dependency graph, per-file source
 /// hashes, target triple, and compiler version. **Add `fingerprint.json` to
-/// `.gitignore`** to prevent unintentional commits. If an error occurs and
-/// `enabled` is `true`, the file may be partially written; the error is
-/// propagated to the caller.
+/// `.gitignore`** to prevent unintentional commits. The write is atomic
+/// (written to a `.tmp` file then renamed).
 ///
 /// ```rust,ignore
 /// fn main() {
-///     toolkit_zero::dependency_graph::build::generate_fingerprint()
+///     toolkit_zero::dependency_graph::build::generate_fingerprint(false)
 ///         .expect("fingerprint generation failed");
 ///     toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
 ///         .expect("fingerprint export failed");
@@ -169,7 +186,20 @@ pub fn export(enabled: bool) -> Result<(), BuildTimeFingerprintError> {
     let pretty = serde_json::to_string_pretty(&fingerprint)
         .map_err(|e| BuildTimeFingerprintError::SerializationFailed(e.to_string()))?;
 
-    fs::write(format!("{manifest_dir}/fingerprint.json"), pretty)?;
+    write_atomic(&format!("{manifest_dir}/fingerprint.json"), pretty.as_bytes())?;
+    Ok(())
+}
+
+// ─── atomic write helper ──────────────────────────────────────────────────────
+
+/// Write `data` to `path` atomically: write to `path.tmp` then rename.
+///
+/// On POSIX systems `rename(2)` is atomic within the same filesystem,
+/// so `path` is never observed in a partially-written state.
+fn write_atomic(path: &str, data: &[u8]) -> Result<(), BuildTimeFingerprintError> {
+    let tmp = format!("{path}.tmp");
+    fs::write(&tmp, data)?;
+    fs::rename(&tmp, path)?;
     Ok(())
 }
 

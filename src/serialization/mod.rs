@@ -1,43 +1,27 @@
-//! Struct-to-binary serialization via the VEIL cipher.
+//! Struct-to-binary serialization with authenticated encryption.
 //!
 //! This module converts any [`bincode`]-encodable value into an opaque,
-//! key-dependent byte sequence and back.  The conversion is performed by the
-//! **VEIL** (Variable-Expansion Interleaved Lattice) cipher designed
-//! specifically for this toolkit.
+//! authenticated byte blob and back, using **ChaCha20-Poly1305** (IETF AEAD).
+//! A fresh random 12-byte nonce is generated for every [`seal`] call, so
+//! ciphertexts are non-deterministic even for identical plaintext and key.
 //!
-//! # What VEIL guarantees
+//! # What is guaranteed
 //!
-//! * **No magic bytes / constant header.** The output has no recognisable
-//!   structure — it looks like uniformly random bytes.
-//! * **Key-dependent, irreversible without the key.** Every step of the
-//!   cipher is keyed.  Without the exact key an attacker cannot invert any
-//!   individual step, let alone the full pipeline.
-//! * **Position-sensitive.** Identical plaintext bytes at different offsets
-//!   always produce different ciphertext bytes.
-//! * **Diffusion across the entire message.** Every output byte depends on
-//!   all preceding input bytes (sequential block accumulator).
-//! * **No standard crypto primitives.** The key schedule, S-box, stream, and
-//!   shuffle are all derived from a custom PRNG seeded with a keyed hash.
+//! * **Confidentiality.** The ciphertext reveals nothing about the plaintext
+//!   without the key.
+//! * **Integrity and authenticity.** The Poly1305 tag detects any bit-level
+//!   modification; [`open`] returns an error on tampered or truncated blobs.
+//! * **Semantic security.** The random nonce ensures that encrypting the same
+//!   value twice produces different ciphertexts, preventing chosen-plaintext
+//!   attacks.
+//! * **No magic bytes / constant header.** Every output byte depends on the
+//!   key and a fresh nonce; there is no static recognisable prefix.
 //!
-//! # VEIL pipeline (seal direction)
+//! # Format
 //!
 //! ```text
-//! struct  ──bincode──►  raw bytes
-//!                           │
-//!              ┌────────────▼────────────┐
-//!              │  1. keyed S-box sub     │  each byte replaced via key-derived
-//!              │  2. key-stream XOR      │  permutation table + stream
-//!              │  3. position mixing     │  byte ⊕ f(index, neighbours)
-//!              │  4. block diffusion     │  16-byte blocks, sequential acc
-//!              │  5. block byte shuffle  │  keyed permutation per block
-//!              └────────────┬────────────┘
-//!                           │
-//!              bincode wrap (Vec<u8> envelope)
-//!                           │
-//!                       `Vec<u8>`
+//! blob = nonce (12 B) ‖ AEAD_ciphertext (bincode(value)) ‖ Poly1305 tag (16 B)
 //! ```
-//!
-//! `open` reverses every step in exact reverse order.
 //!
 //! # Default key
 //!
@@ -54,19 +38,20 @@
 //!
 //! let p = Point { x: 1.5, y: -3.0 };
 //!
-//! let blob = seal(&p, None).unwrap();
-//! let back: Point = open(&blob, None).unwrap();
+//! // default key — string literals work directly
+//! let blob = seal(&p, None::<&str>).unwrap();
+//! let back: Point = open(&blob, None::<&str>).unwrap();
 //! assert_eq!(p, back);
 //!
-//! // with an explicit key
-//! let blob2 = seal(&p, Some("my secret key".to_string())).unwrap();
-//! let back2: Point = open(&blob2, Some("my secret key".to_string())).unwrap();
+//! // explicit key — str literals or String are both accepted
+//! let blob2 = seal(&p, Some("my secret key")).unwrap();
+//! let back2: Point = open(&blob2, Some("my secret key")).unwrap();
 //! assert_eq!(p, back2);
 //! ```
 
-mod veil;
+mod aead;
 
-pub use veil::{seal, open, SerializationError};
+pub use aead::{seal, open, SerializationError};
 pub use bincode::{Encode, Decode};
 // Re-exported so that `#[serializable]` users don't need a direct `bincode` dep.
 // bincode's proc-macro derive generates code that resolves `bincode::` against

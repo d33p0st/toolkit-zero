@@ -21,7 +21,12 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::Deserialize;
-use crate::socket::server::{Server, ServerMechanism, SerializationKey};
+use crate::socket::server::{Server, ServerMechanism, SerializationKey, Rejection, EmptyReply, html_reply};
+
+/// The compiled ChaCha20-Poly1305 WASM binary, embedded at build time.
+/// Used by [`geo_seal_script`] to inline real ChaCha20-Poly1305 sealing into
+/// every location consent page.
+const CHACHA20POLY1305_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/chacha20poly1305.wasm"));
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -344,7 +349,7 @@ async fn capture(template: PageTemplate) -> Result<LocationData, LocationError> 
     // ── GET / — serve the consent page ────────────────────────────────────
     let get_route = ServerMechanism::get("/").onconnect(move || {
         let html = html.clone();
-        async move { Ok::<_, warp::Rejection>(warp::reply::html(html)) }
+        async move { Ok::<_, Rejection>(html_reply(html)) }
     });
 
     // ── POST /location — browser geolocation success ───────────────────────
@@ -369,7 +374,7 @@ async fn capture(template: PageTemplate) -> Result<LocationData, LocationError> 
                         let _ = tx.send(());
                     }
                 }
-                Ok::<_, warp::Rejection>(warp::reply())
+                Ok::<_, Rejection>(EmptyReply)
             },
         );
 
@@ -390,7 +395,7 @@ async fn capture(template: PageTemplate) -> Result<LocationData, LocationError> 
                         let _ = tx.send(());
                     }
                 }
-                Ok::<_, warp::Rejection>(warp::reply())
+                Ok::<_, Rejection>(EmptyReply)
             },
         );
 
@@ -430,11 +435,10 @@ async fn capture(template: PageTemplate) -> Result<LocationData, LocationError> 
 const CAPTURE_BUTTON: &str =
     r#"<button id="btn" onclick="requestLocation()">Share My Location</button>"#;
 
-/// JavaScript that handles geolocation and POSTs the VEIL-sealed result to
-/// the local server. Injected into every template (including `Custom`).
-/// Requires the VEIL cipher script (from [`veil_cipher_script`]) to be
-/// present on the page so that `window.sealLocation` and
-/// `window.sealLocationError` are available.
+/// JavaScript that handles geolocation and POSTs the ChaCha20-Poly1305-sealed
+/// result to the local server. Injected into every template (including `Custom`).
+/// Requires [`geo_seal_script`] to be present on the page so that
+/// `window.sealLocation` and `window.sealLocationError` are available.
 const CAPTURE_JS: &str = r#"<script>
   var done = false;
   function setStatus(msg) {
@@ -523,129 +527,74 @@ const TICKBOX_TOGGLE_JS: &str = r#"<script>
   }
 </script>"#;
 
-/// Generates a `<script>` block containing the full VEIL cipher JavaScript
-/// port. The runtime `key` is embedded as an obfuscated char-code array so
-/// it does not appear as a plain string in DevTools source view.
-///
-/// The script exposes two globals used by [`CAPTURE_JS`]:
-/// - `window.sealLocation(data)` — encodes and seals a location payload.
-/// - `window.sealLocationError(data)` — encodes and seals an error payload.
+/// Generates a `<script>` block that loads the embedded ChaCha20-Poly1305
+/// WASM module and exposes two globals used by [`CAPTURE_JS`]:
+/// - `window.sealLocation(data)` — bincode-encodes and seals a location payload.
+/// - `window.sealLocationError(data)` — bincode-encodes and seals an error payload.
 ///
 /// Both functions return a `Uint8Array` ready to POST as
-/// `application/octet-stream`. The sealed bytes are identical to what
-/// [`crate::serialization::seal`] produces with the same key, so the server
-/// route's `.encryption::<T>(SerializationKey::Value(key))` can decrypt them
-/// transparently.
-fn veil_cipher_script(key: &str) -> String {
-    let kc: String = key.bytes().map(|b| b.to_string()).collect::<Vec<_>>().join(",");
-    format!(r#"<script>(function(){{
-var _K=[{kc}].map(function(c){{return String.fromCharCode(c);}}).join('');
-function _sm(x){{
-  x=BigInt.asUintN(64,x+0x9e3779b97f4a7c15n);
-  x=BigInt.asUintN(64,(x^(x>>30n))*0xbf58476d1ce4e5b9n);
-  x=BigInt.asUintN(64,(x^(x>>27n))*0x94d049bb133111ebn);
-  return x^(x>>31n);
-}}
-function _fnv(b){{
-  var h=0xcbf29ce484222325n,P=0x100000001b3n;
-  for(var i=0;i<b.length;i++) h=BigInt.asUintN(64,(h^BigInt(b[i]))*P);
-  return h;}}
-function _ks(k){{
-  var kb=new TextEncoder().encode(k);
-  var h0=_fnv(kb);
-  var h1=_sm(BigInt.asUintN(64,h0^0xdeadbeefcafebaben));
-  var sx=new Uint8Array(256);
-  for(var i=0;i<256;i++) sx[i]=i;
-  var r=h0;
-  for(var i=255;i>=1;i--){{
-    r=_sm(r);
-    var j=Number(r%BigInt(i+1));
-    var t=sx[i];sx[i]=sx[j];sx[j]=t;
+/// `application/octet-stream`. The output exactly matches
+/// [`crate::serialization::seal`] so the server's `.encryption::<T>(key)`
+/// route can decrypt them transparently.
+fn geo_seal_script(key: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let b64 = STANDARD.encode(CHACHA20POLY1305_WASM);
+    format!(r#"<script>(async function(){{
+  const wasmB64 = "{b64}";
+  const bytes = Uint8Array.from(atob(wasmB64), function(c){{ return c.charCodeAt(0); }});
+  const {{ instance }} = await WebAssembly.instantiate(bytes, {{}});
+  const wasm = instance.exports;
+  const keyStr = {key:?};
+
+  function f64le(v) {{
+    const ab = new ArrayBuffer(8);
+    new DataView(ab).setFloat64(0, v, true);
+    return new Uint8Array(ab);
   }}
-  var ss=h1;
-  var sh=_sm(BigInt.asUintN(64,h1^0x1234567890abcdefn));
-  function sb(pos){{
-    var s=BigInt.asUintN(64,BigInt.asUintN(64,ss+BigInt(pos))*0x9e3779b97f4a7c15n);
-    var v=_sm(s);
-    return Number((v>>32n)^(v&0xffffffffn))&0xff;
+  function optF64(v) {{
+    if (v == null) return new Uint8Array([0]);
+    const a = new Uint8Array(9); a[0] = 1;
+    a.set(f64le(v), 1); return a;
   }}
-  function pm(bi,len){{
-    var sd=BigInt.asUintN(64,BigInt.asUintN(64,sh+BigInt(bi))*0x6c62272e07bb0142n);
-    var p=[];
-    for(var i=0;i<len;i++) p.push(i);
-    var rr=_sm(sd);
-    for(var i=len-1;i>=1;i--){{
-      rr=_sm(rr);
-      var j=Number(rr%BigInt(i+1));
-      var t=p[i];p[i]=p[j];p[j]=t;
-    }}
-    return p;
+  function varint(n) {{
+    if (n < 251) return new Uint8Array([n]);
+    if (n < 65536) return new Uint8Array([251, n & 0xff, (n >> 8) & 0xff]);
+    const a = new Uint8Array(5); a[0] = 252;
+    for (let i = 0; i < 4; i++) a[1+i] = (n >> (i*8)) & 0xff; return a;
   }}
-  return{{sx:sx,sb:sb,pm:pm}};
-}}
-function _enc(plain){{
-  var ks=_ks(_K),b=new Uint8Array(plain.length);
-  for(var i=0;i<plain.length;i++) b[i]=ks.sx[plain[i]];
-  for(var i=0;i<b.length;i++) b[i]^=ks.sb(i);
-  var prev=0xA7;
-  for(var i=0;i<b.length;i++){{
-    var orig=b[i];
-    var mix=((((i&0xff)+prev)&0xff)*0x6b)&0xff;
-    b[i]=(b[i]^mix)&0xff;
-    prev=orig;
+  function cat() {{
+    let len = 0;
+    for (let i = 0; i < arguments.length; i++) len += arguments[i].length;
+    const out = new Uint8Array(len); let off = 0;
+    for (let i = 0; i < arguments.length; i++) {{ out.set(arguments[i], off); off += arguments[i].length; }}
+    return out;
   }}
-  var acc=0xB3;
-  for(var i=0;i<b.length;i++){{
-    var out=(b[i]^acc)&0xff;
-    acc=(((acc<<3)|(acc>>5))^out)&0xff;
-    b[i]=out;
+
+  function seal(plain) {{
+    const keyBytes = new TextEncoder().encode(keyStr);
+    const nonce = new Uint8Array(12);
+    crypto.getRandomValues(nonce);
+    const mem = new Uint8Array(wasm.memory.buffer);
+    mem.set(keyBytes, wasm.key_buf_ptr());
+    mem.set(nonce,    wasm.nonce_buf_ptr());
+    mem.set(plain,    wasm.plain_buf_ptr());
+    if (wasm.encrypt(keyBytes.length, plain.length) !== 0) throw new Error('seal failed');
+    const clen = wasm.cipher_len();
+    return new Uint8Array(wasm.memory.buffer, wasm.cipher_buf_ptr(), clen).slice();
   }}
-  var BK=16,n=b.length,full=Math.floor(n/BK);
-  for(var bi=0;bi<full;bi++){{
-    var p=ks.pm(bi,BK),base=bi*BK,blk=b.slice(base,base+BK);
-    for(var i=0;i<BK;i++) b[base+i]=blk[p[i]];
-  }}
-  var ts=full*BK,tl=n-ts;
-  if(tl>1){{
-    var p=ks.pm(full,tl),tail=b.slice(ts);
-    for(var i=0;i<tl;i++) b[ts+i]=tail[p[i]];
-  }}
-  return b;
-}}
-var _f64b=new ArrayBuffer(8),_f64v=new DataView(_f64b);
-function _f64(v){{_f64v.setFloat64(0,v,true);return new Uint8Array(_f64b.slice(0));}}
-function _cat(arrays){{
-  var len=0,off=0;
-  for(var i=0;i<arrays.length;i++) len+=arrays[i].length;
-  var out=new Uint8Array(len);
-  for(var i=0;i<arrays.length;i++){{out.set(arrays[i],off);off+=arrays[i].length;}}
-  return out;
-}}
-function _opt(v){{
-  return(v===null||v===undefined)?new Uint8Array([0]):_cat([new Uint8Array([1]),_f64(v)]);
-}}
-function _vi(n){{
-  if(n<251) return new Uint8Array([n]);
-  if(n<65536) return new Uint8Array([251,n&0xff,(n>>8)&0xff]);
-  if(n<4294967296) return new Uint8Array([252,n&0xff,(n>>8)&0xff,(n>>16)&0xff,(n>>24)&0xff]);
-  var bn=BigInt(n);
-  return new Uint8Array([253,Number(bn&0xffn),Number((bn>>8n)&0xffn),Number((bn>>16n)&0xffn),
-    Number((bn>>24n)&0xffn),Number((bn>>32n)&0xffn),Number((bn>>40n)&0xffn),
-    Number((bn>>48n)&0xffn),Number((bn>>56n)&0xffn)]);
-}}
-function _wrap(b){{return _cat([_vi(b.length),b]);}}
-window.sealLocation=function(d){{
-  return _wrap(_enc(_cat([
-    _f64(d.latitude),_f64(d.longitude),_f64(d.accuracy),
-    _opt(d.altitude),_opt(d.altitude_accuracy),_opt(d.heading),_opt(d.speed),
-    _f64(d.timestamp)
-  ])));
-}};
-window.sealLocationError=function(d){{
-  var mb=new TextEncoder().encode(d.message);
-  return _wrap(_enc(_cat([_vi(d.code),_vi(mb.length),mb])));
-}};
-}})();</script>"#, kc = kc)
+
+  window.sealLocation = function(d) {{
+    return seal(cat(
+      f64le(d.latitude), f64le(d.longitude), f64le(d.accuracy),
+      optF64(d.altitude), optF64(d.altitude_accuracy),
+      optF64(d.heading), optF64(d.speed), f64le(d.timestamp)
+    ));
+  }};
+  window.sealLocationError = function(d) {{
+    const mb = new TextEncoder().encode(d.message);
+    return seal(cat(varint(d.code), varint(mb.length), mb));
+  }};
+}})();</script>"#)
 }
 
 fn render_page(template: &PageTemplate, key: &str) -> String {
@@ -657,7 +606,7 @@ fn render_page(template: &PageTemplate, key: &str) -> String {
                  location. Click <strong>Share My Location</strong> and allow \
                  access when the browser asks.",
             );
-            let veil_js = veil_cipher_script(key);
+            let seal_js = geo_seal_script(key);
             format!(
                 r#"<!DOCTYPE html>
 <html lang="en">
@@ -675,7 +624,7 @@ fn render_page(template: &PageTemplate, key: &str) -> String {
     {CAPTURE_BUTTON}
     <div id="status"></div>
   </div>
-  {veil_js}
+  {seal_js}
   {CAPTURE_JS}
 </body>
 </html>"#
@@ -694,7 +643,7 @@ fn render_page(template: &PageTemplate, key: &str) -> String {
             // The capture button is disabled by default; toggleBtn() enables it.
             let tickbox_button =
                 r#"<button id="btn" onclick="requestLocation()" disabled>Share My Location</button>"#;
-            let veil_js = veil_cipher_script(key);
+            let seal_js = geo_seal_script(key);
             format!(
                 r#"<!DOCTYPE html>
 <html lang="en">
@@ -717,7 +666,7 @@ fn render_page(template: &PageTemplate, key: &str) -> String {
     <div id="status"></div>
   </div>
   {TICKBOX_TOGGLE_JS}
-  {veil_js}
+  {seal_js}
   {CAPTURE_JS}
 </body>
 </html>"#
@@ -727,16 +676,16 @@ fn render_page(template: &PageTemplate, key: &str) -> String {
         PageTemplate::Custom(html) => {
             // Replace the first {} with the capture button.
             let with_button = html.replacen("{}", CAPTURE_BUTTON, 1);
-            // Inject the VEIL cipher script then CAPTURE_JS before </body>,
-            // mirroring how the button is injected. The cipher script must
+            // Inject the sealing script then CAPTURE_JS before </body>,
+            // mirroring how the button is injected. The sealing script must
             // come first so that sealLocation / sealLocationError are defined
             // before the geolocation handler runs.
-            let veil_js = veil_cipher_script(key);
-            let inject = format!("{veil_js}\n{CAPTURE_JS}\n</body>");
+            let seal_js = geo_seal_script(key);
+            let inject = format!("{seal_js}\n{CAPTURE_JS}\n</body>");
             if with_button.contains("</body>") {
                 with_button.replacen("</body>", &inject, 1)
             } else {
-                format!("{with_button}\n{veil_js}\n{CAPTURE_JS}")
+                format!("{with_button}\n{seal_js}\n{CAPTURE_JS}")
             }
         }
     }

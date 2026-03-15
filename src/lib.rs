@@ -23,9 +23,9 @@
 //!
 //! | Feature | Enables | Exposes |
 //! |---|---|---|
-//! | `serialization` | VEIL cipher (seal / open) | [`serialization`] |
-//! | `socket-server` | VEIL + typed HTTP server builder | [`socket::server`] |
-//! | `socket-client` | VEIL + typed HTTP client builder | [`socket::client`] |
+//! | `serialization` | ChaCha20-Poly1305 authenticated encryption (seal / open) | [`serialization`] |
+//! | `socket-server` | Authenticated encryption + typed HTTP server builder | [`socket::server`] |
+//! | `socket-client` | Authenticated encryption + typed HTTP client builder | [`socket::client`] |
 //! | `socket` | Both `socket-server` and `socket-client` | both |
 //! | `location-browser` | Browser-based geolocation | [`location::browser`] |
 //! | `location` | Alias for `location-browser` | [`location`] |
@@ -40,50 +40,52 @@
 //!
 //! ```toml
 //! [dependencies]
-//! # Only the VEIL cipher
-//! toolkit-zero = { version = "3", features = ["serialization"] }
+//! # ChaCha20-Poly1305 authenticated encryption (seal / open)
+//! toolkit-zero = { version = "4", features = ["serialization"] }
 //!
 //! # HTTP server only
-//! toolkit-zero = { version = "3", features = ["socket-server"] }
+//! toolkit-zero = { version = "4", features = ["socket-server"] }
 //!
 //! # HTTP client only
-//! toolkit-zero = { version = "3", features = ["socket-client"] }
+//! toolkit-zero = { version = "4", features = ["socket-client"] }
 //!
 //! # Both sides of the socket
-//! toolkit-zero = { version = "3", features = ["socket"] }
+//! toolkit-zero = { version = "4", features = ["socket"] }
 //!
 //! # Geolocation (bundles socket-server automatically)
-//! toolkit-zero = { version = "3", features = ["location"] }
+//! toolkit-zero = { version = "4", features = ["location"] }
 //!
 //! # Full time-lock encryption suite
-//! toolkit-zero = { version = "3", features = ["encryption"] }
+//! toolkit-zero = { version = "4", features = ["encryption"] }
 //!
 //! # Attach build-time fingerprint in build.rs
 //! # [build-dependencies]
-//! toolkit-zero = { version = "3", features = ["dependency-graph-build"] }
+//! toolkit-zero = { version = "4", features = ["dependency-graph-build"] }
 //!
 //! # Read build-time fingerprint at runtime
 //! # [dependencies]
-//! toolkit-zero = { version = "3", features = ["dependency-graph-capture"] }
+//! toolkit-zero = { version = "4", features = ["dependency-graph-capture"] }
 //!
 //! # Re-export deps alongside socket-server
-//! toolkit-zero = { version = "3", features = ["socket-server", "backend-deps"] }
+//! toolkit-zero = { version = "4", features = ["socket-server", "backend-deps"] }
 //! ```
 //!
 //! ---
 //!
 //! ## Serialization
 //!
-//! The `serialization` feature exposes the **VEIL cipher** — a custom,
-//! key-dependent binary codec that transforms any [`bincode`]-encodable value
-//! into an opaque byte sequence and back.
+//! The `serialization` feature exposes **ChaCha20-Poly1305 authenticated encryption**
+//! (IETF AEAD): [`serialization::seal`] encodes any [`bincode`]-encodable value and
+//! encrypts it with a random 12-byte nonce; [`serialization::open`] verifies the
+//! Poly1305 tag and decodes it back. A tampered ciphertext or wrong key is always
+//! detected and rejected.
 //!
-//! Keys are moved into [`serialization::seal`] / [`serialization::open`] and
-//! wrapped in `Zeroizing<String>` internally, wiping them from memory on drop.
+//! Keys implement `AsRef<str>` — plain `&str` literals and `String` both work.
+//! Key material is stored in `Zeroizing<String>` internally and wiped on drop.
 //!
 //! The two entry points are [`serialization::seal`] and [`serialization::open`].
-//! Every output byte is a function of the complete input and the key; without
-//! the exact key, the output cannot be reversed.
+//! Because a fresh nonce is generated per call, encrypting the same value twice
+//! produces different ciphertexts (semantic security).
 //!
 //! Three attribute macros are also available via the `serialization` feature:
 //!
@@ -100,12 +102,12 @@
 //! struct Point { x: f64, y: f64 }
 //!
 //! let p = Point { x: 1.0, y: -2.0 };
-//! let blob = seal(&p, None).unwrap();                          // default key
-//! let back: Point = open(&blob, None).unwrap();
+//! let blob = seal(&p, None::<&str>).unwrap();      // default key
+//! let back: Point = open(&blob, None::<&str>).unwrap();
 //! assert_eq!(p, back);
 //!
-//! let blob2 = seal(&p, Some("my-key".to_string())).unwrap();              // custom key
-//! let back2: Point = open(&blob2, Some("my-key".to_string())).unwrap();
+//! let blob2 = seal(&p, Some("my-key")).unwrap();   // &str key — no .to_string() needed
+//! let back2: Point = open(&blob2, Some("my-key")).unwrap();
 //! assert_eq!(p, back2);
 //! ```
 //!
@@ -177,11 +179,21 @@
 //! # }
 //! ```
 //!
-//! VEIL-encrypted routes are also supported via
+//! Authenticated-encrypted routes are also supported via
 //! [`socket::server::ServerMechanism::encryption`] and
 //! [`socket::server::ServerMechanism::encrypted_query`].
-//! The body or query is decrypted before the handler is called; a wrong key or
-//! corrupt payload returns `403 Forbidden` automatically.
+//! The body or query is decrypted (ChaCha20-Poly1305) before the handler is called;
+//! a wrong key or corrupt payload returns `403 Forbidden` automatically.
+//!
+//! ### Background server
+//!
+//! Call [`socket::server::Server::serve_managed`] to receive a
+//! [`socket::server::BackgroundServer`] handle.  The server starts immediately;
+//! the handle exposes [`addr()`](socket::server::BackgroundServer::addr),
+//! [`rebind(addr)`](socket::server::BackgroundServer::rebind) (graceful restart on a
+//! new port, all routes preserved),
+//! [`mechanism(route)`](socket::server::BackgroundServer::mechanism) (hot-plug a new
+//! route with no restart), and [`stop()`](socket::server::BackgroundServer::stop).
 //!
 //! ### `#[mechanism]` attribute macro
 //!
@@ -242,8 +254,12 @@
 //! struct Filter { page: u32 }
 //!
 //! # async fn run() -> Result<(), reqwest::Error> {
-//! // Async-only client — safe inside #[tokio::main]
-//! let client = Client::new_async(Target::Localhost(8080));
+//! // Async-only client with a 5-second timeout — safe inside #[tokio::main]
+//! use std::time::Duration;
+//! use toolkit_zero::socket::client::ClientBuilder;
+//! let client = ClientBuilder::new(Target::Localhost(8080))
+//!     .timeout(Duration::from_secs(5))
+//!     .build_async();
 //!
 //! // Plain GET
 //! let items: Vec<Item> = client.get("/items").send().await?;
@@ -262,17 +278,18 @@
 //!     .send()
 //!     .await?;
 //!
-//! // Synchronous DELETE (Client::new_sync must be called outside any async runtime)
-//! let _: Item = client.delete("/items/1").send_sync()?;
+//! // Synchronous client — must be built outside any async runtime
+//! let sync_client = ClientBuilder::new(Target::Localhost(8080)).build_sync();
+//! let _: Item = sync_client.delete("/items/1").send_sync()?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! VEIL-encrypted requests are available via
+//! Authenticated-encrypted requests are available via
 //! [`socket::client::RequestBuilder::encryption`] and
 //! [`socket::client::RequestBuilder::encrypted_query`].
-//! The body or query parameters are sealed before the wire send; the response is
-//! opened automatically.
+//! The body or query parameters are sealed (ChaCha20-Poly1305) before the wire send;
+//! the sealed response is opened automatically.
 //!
 //! ### `#[request]` attribute macro
 //!
@@ -287,7 +304,7 @@
 //! or `sync` (`.send_sync::<R>()?`).
 //!
 //! ```rust,ignore
-//! use toolkit_zero::socket::client::{Client, Target, request};
+//! use toolkit_zero::socket::client::{ClientBuilder, Target, request};
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Deserialize, Serialize, Clone)]
@@ -297,7 +314,10 @@
 //! struct NewItem { name: String }
 //!
 //! # async fn run() -> Result<(), reqwest::Error> {
-//! let client = Client::new_async(Target::Localhost(8080));
+//! use std::time::Duration;
+//! let client = ClientBuilder::new(Target::Localhost(8080))
+//!     .timeout(Duration::from_secs(5))
+//!     .build_async();
 //!
 //! // Plain async GET
 //! #[request(client, GET, "/items", async)]
@@ -462,16 +482,15 @@
 //! [`dependency_graph::build::generate_fingerprint`] runs `cargo metadata`, hashes
 //! `Cargo.lock` and every `.rs` file under `src/`, captures the profile, target
 //! triple, rustc version, and active features, then writes a compact, normalised
-//! JSON document to `$OUT_DIR/fingerprint.json`.
+//! JSON document to `$OUT_DIR/fingerprint.json`. Pass `true` to also export a
+//! pretty-printed copy alongside `Cargo.toml`.
 //! [`dependency_graph::build::export`] optionally writes a pretty-printed copy
-//! alongside `Cargo.toml` for local inspection — pass `false` or
-//! `cfg!(debug_assertions)` to suppress it in release builds.
+//! alongside `Cargo.toml` as a standalone call (useful when you want to combine it
+//! with a separate `generate_fingerprint(false)` invocation).
 //!
 //! **`dependency-graph-capture`** (goes in `[dependencies]`):
 //! [`dependency_graph::capture::parse`] deserialises the embedded snapshot into a
 //! typed [`dependency_graph::capture::BuildTimeFingerprintData`] struct.
-//! [`dependency_graph::capture::as_bytes`] returns the raw JSON bytes, which are
-//! stable and deterministic across equivalent builds.
 //!
 //! ### `#[dependencies]` attribute macro
 //!
@@ -490,7 +509,7 @@
 //! }
 //!
 //! fn raw() -> &'static [u8] {
-//!     #[dependencies(bytes)]      // → let raw: &'static [u8] = as_bytes(...);
+//!     #[dependencies(bytes)]      // → let raw: &'static [u8] = include_str!(...).as_bytes();
 //!     fn raw() {}
 //!     raw
 //! }
@@ -512,21 +531,19 @@
 //!
 //! ```toml
 //! [dependencies]
-//! toolkit-zero = { version = "3", features = ["dependency-graph-capture"] }
+//! toolkit-zero = { version = "4", features = ["dependency-graph-capture"] }
 //!
 //! [build-dependencies]
-//! toolkit-zero = { version = "3", features = ["dependency-graph-build"] }
+//! toolkit-zero = { version = "4", features = ["dependency-graph-build"] }
 //! ```
 //!
 //! `build.rs`:
 //!
 //! ```rust,ignore
 //! fn main() {
-//!     toolkit_zero::dependency_graph::build::generate_fingerprint()
+//!     // Pass true to also export a pretty-printed copy alongside Cargo.toml.
+//!     toolkit_zero::dependency_graph::build::generate_fingerprint(cfg!(debug_assertions))
 //!         .expect("fingerprint generation failed");
-//!     // optional: pretty-print to crate root for local inspection
-//!     toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
-//!         .expect("fingerprint export failed");
 //! }
 //! ```
 //!
@@ -543,7 +560,7 @@
 //!     println!("target : {}", data.build.target);
 //!     println!("lock   : {}", data.cargo_lock_sha256);
 //!
-//!     let raw = capture::as_bytes(BUILD_TIME_FINGERPRINT);
+//!     let raw: &[u8] = BUILD_TIME_FINGERPRINT.as_bytes();
 //!     println!("{} bytes", raw.len());
 //! }
 //! ```
@@ -578,7 +595,7 @@
 //! | Module | Path | Re-exports |
 //! |---|---|---|
 //! | serialization | [`serialization::backend_deps`] | `bincode`, `base64`, `zeroize` |
-//! | socket (server) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `warp` |
+//! | socket (server) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `hyper`, `hyper_util`, `http`, `http_body_util` |
 //! | socket (client) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
 //! | location | [`location::backend_deps`] | `tokio`, `serde`, `webbrowser`, `rand` |
 //! | encryption (timelock) | [`encryption::timelock::backend_deps`] | `argon2`, `scrypt`, `zeroize`, `chrono`, `rand`; `tokio` (async variants only) |

@@ -1,8 +1,9 @@
 [package]
 name = "toolkit-zero"
-version = "3.4.0"
+version = "4.0.0"
 edition = "2024"
 rust-version = "1.85"
+build = "build.rs"
 authors = ["Soumyo Deep Gupta <deep.main.ac@gmail.com>"]
 description = "A feature-selective Rust utility crate — a modular collection of opt-in utilities spanning encryption, HTTP networking, geolocation, and build-time fingerprinting. Enable only the features your project requires."
 license = "MIT"
@@ -12,7 +13,14 @@ documentation = "https://docs.rs/toolkit-zero"
 readme = "README.md"
 keywords = ["encryption", "kdf", "timelock", "socket", "geolocation"]
 categories = ["cryptography", "network-programming", "web-programming", "asynchronous", "authentication"]
-exclude = ["target/", ".github/", "*.d"]
+include = [
+    "src/**/*",
+    "build.rs",
+    "assets/chacha20poly1305.wasm",
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+]
 
 [badges]
 maintenance = { status = "actively-developed" }
@@ -26,7 +34,12 @@ argon2  = { version = "0.5", optional = true, features = ["zeroize"] }
 base64  = { version = "0.22", optional = true }
 bincode = { version = "2", optional = true }
 bytes   = { version = "1", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
 chrono  = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+http    = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper   = { version = "1", features = ["server", "http1", "http2"], optional = true }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "tokio"], optional = true }
 log     = { version = "0.4.29", optional = true }
 rand    = { version = "0.9", optional = true }
 reqwest = { version = "0.13.2", optional = true, features = ["blocking", "json", "query"] }
@@ -36,23 +49,25 @@ serde_json  = { version = "1", optional = true }
 sha2        = { version = "0.10", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
 tokio   = { version = "1.50.0", features = ["full"], optional = true }
-warp    = { version = "0.4.2", optional = true }
 webbrowser = { version = "0.8", optional = true }
 zeroize = { version = "1", optional = true, features = ["derive"] }
-toolkit-zero-macros = { path = "toolkit-zero-macros", version = "0.3.0", optional = true }
+toolkit-zero-macros = { path = "toolkit-zero-macros", version = "1.0.0", optional = true }
 
 [features]
 default = []
-serialization = ["dep:bincode", "dep:base64", "dep:zeroize", "zeroize/derive", "dep:toolkit-zero-macros", "toolkit-zero-macros/serialization"]
+serialization = ["dep:bincode", "dep:base64", "dep:zeroize", "zeroize/derive", "dep:sha2", "dep:rand", "dep:chacha20poly1305", "dep:toolkit-zero-macros", "toolkit-zero-macros/serialization"]
 socket = ["socket-server", "socket-client"]
 socket-server = [
     "serialization",
     "dep:bytes",
     "dep:serde",
     "serde/derive",
+    "dep:serde_json",
     "dep:serde_urlencoded",
-    "dep:warp",
-    "warp/server",
+    "dep:http",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
     "dep:log",
     "dep:tokio",
     "tokio/rt",
@@ -91,8 +106,28 @@ name = "timelock_round_trip"
 required-features = ["encryption"]
 
 [[example]]
-name = "veil_seal_open"
+name = "seal_open"
 required-features = ["serialization"]
+
+[[example]]
+name = "socket_client_server"
+required-features = ["socket"]
+
+[[example]]
+name = "location_browser"
+required-features = ["location"]
+
+[[example]]
+name = "socket_macros"
+required-features = ["socket"]
+
+[[example]]
+name = "serialization_macros"
+required-features = ["serialization"]
+
+[[example]]
+name = "browser_macro"
+required-features = ["location"]
 
 [workspace]
 members = ["testcrate","toolkit-zero-macros"]

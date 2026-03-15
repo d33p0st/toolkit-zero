@@ -1,8 +1,8 @@
 // ─── #[dependencies] ──────────────────────────────────────────────────────────
 //
 // Attribute macro that replaces a decorated empty `fn` with an inline
-// `capture::parse(…)?` or `capture::as_bytes(…)` call, embedding the
-// build-time fingerprint JSON via `include_str!`.
+// `capture::parse(…)?` or `.as_bytes()` call, embedding the build-time
+// fingerprint JSON via `include_str!`.
 //
 // The function name becomes the `let` binding name in the expansion.
 //
@@ -65,7 +65,7 @@ pub fn expand_dependencies(attr: TokenStream, item: TokenStream) -> TokenStream 
             const __TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__: &str =
                 include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
             let #binding: &'static [u8] =
-                #cap::as_bytes(__TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__);
+                __TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__.as_bytes();
         }
     } else {
         quote! {

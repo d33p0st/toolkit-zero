@@ -1,0 +1,26 @@
+[package]
+name = "chacha20poly1305-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WASM helper: ChaCha20-Poly1305 sealing for the toolkit-zero location browser module."
+publish = false
+
+# Stand-alone workspace — keeps this crate out of the outer workspace so that
+# the build.rs nested cargo invocation does not conflict with the outer lock.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# No wasm-bindgen needed — we use static buffers and raw C-ABI exports.
+# Both crates support no_std and wasm32-unknown-unknown out of the box.
+chacha20poly1305 = { version = "0.10", default-features = false }
+sha2             = { version = "0.10", default-features = false }
+
+[profile.release]
+opt-level       = "z"   # minimise binary size
+lto             = true
+codegen-units   = 1
+strip           = true
+panic           = "abort"

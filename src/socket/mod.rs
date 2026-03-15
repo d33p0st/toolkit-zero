@@ -13,13 +13,16 @@
 //!
 //! Build typed HTTP routes using a fluent builder chain starting from [`server::ServerMechanism`].
 //! Routes are registered on a [`server::Server`] and served with a single `.await`.
+//! For runtime address migration or live route insertion, use
+//! [`server::Server::serve_managed`] which returns a [`server::BackgroundServer`] handle
+//! (see [`server::BackgroundServer::rebind`] and [`server::BackgroundServer::mechanism`]).
 //!
 //! The chain supports:
 //! - **No extras** — handler receives no arguments
 //! - **JSON body** — via `.json::<T>()`, handler receives `T: DeserializeOwned`
 //! - **Query params** — via `.query::<T>()`, handler receives `T: DeserializeOwned`
-//! - **VEIL-encrypted body** — via `.encryption::<T>(key)`, body is decrypted before delivery
-//! - **VEIL-encrypted query** — via `.encrypted_query::<T>(key)`, query is decrypted before delivery
+//! - **Authenticated-encrypted body** — via `.encryption::<T>(key)`, body is decrypted before delivery
+//! - **Authenticated-encrypted query** — via `.encrypted_query::<T>(key)`, query is decrypted before delivery
 //! - **Shared state** — via `.state(s)`, handler receives a clone of `S`
 //! - **State + body / State + query** — any of the above combined with `.state(s)`
 //!
@@ -33,7 +36,7 @@
 //! ```rust,no_run
 //! # use toolkit_zero::socket::server::*;
 //! # use serde::{Deserialize, Serialize};
-//! # #[derive(Deserialize, Serialize)] struct Item { id: u32, name: String }
+//! # #[derive(Deserialize, Serialize, Clone)] struct Item { id: u32, name: String }
 //! # #[derive(Deserialize)] struct NewItem { name: String }
 //! # #[derive(Deserialize)] struct Filter { page: u32 }
 //! # use std::sync::{Arc, Mutex};
@@ -139,7 +142,7 @@
 //! // Server:
 //! //   ServerMechanism::delete("/items/1")
 //! //       .onconnect(|| async {
-//! //           reply!(message => warp::reply(), status => Status::NoContent)
+//! //           reply!(message => toolkit_zero::socket::server::EmptyReply, status => Status::NoContent)
 //! //       })
 //! let _: Item = client.delete("/items/1").send_sync()?;
 //!
@@ -149,7 +152,7 @@
 
 // ─── Serialization key (shared by server and client) ────────────────────────
 
-/// Controls which VEIL key is used when the body or query parameters are sealed.
+/// Controls which ChaCha20-Poly1305 key is used when the body or query parameters are sealed.
 ///
 /// Pass this to [`server::ServerMechanism::encryption`], [`server::ServerMechanism::encrypted_query`],
 /// [`client::RequestBuilder::encryption`], and [`client::RequestBuilder::encrypted_query`].
@@ -157,13 +160,13 @@
 ///
 /// | Variant | Wire format | Trait requirements on `T` |
 /// |---|---|---|
-/// | `Default` | VEIL-sealed bytes (`application/octet-stream`) | `bincode::Encode` / `Decode<()>` |
-/// | `Value(key)` | VEIL-sealed bytes with a custom key | `bincode::Encode` / `Decode<()>` |
+/// | `Default` | ChaCha20-Poly1305-sealed bytes (`application/octet-stream`) | `bincode::Encode` / `Decode<()>` |
+/// | `Value(key)` | ChaCha20-Poly1305-sealed bytes with a custom key | `bincode::Encode` / `Decode<()>` |
 #[derive(Clone)]
 pub enum SerializationKey {
-    /// Use the built-in default VEIL key (`"serialization/deserialization"`).
+    /// Use the built-in default key (`"serialization/deserialization"`).
     Default,
-    /// Use a custom VEIL key shared by both client and server.
+    /// Use a custom key, shared by both client and server.
     Value(String),
 }
 

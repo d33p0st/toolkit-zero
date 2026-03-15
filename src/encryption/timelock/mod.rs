@@ -157,6 +157,18 @@ pub enum TimeFormat {
     Hour12,
 }
 
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+impl Default for TimeFormat {
+    /// Default clock representation is 24-hour (`Hour24`).
+    fn default() -> Self { Self::Hour24 }
+}
+
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+impl Default for TimePrecision {
+    /// Default precision is per-minute (`Minute`).
+    fn default() -> Self { Self::Minute }
+}
+
 // ─── schedule cadence ────────────────────────────────────────────────────────
 
 /// Day of the week, Monday-indexed (Mon = 0 … Sun = 6).
@@ -379,6 +391,12 @@ pub enum TimeLockCadence {
     ///
     /// Compact discriminant: `6`.
     DayOfWeekAndDayOfMonth(Weekday, u8),
+}
+
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+impl Default for TimeLockCadence {
+    /// Default cadence is `None` (no calendar constraint).
+    fn default() -> Self { Self::None }
 }
 
 #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
@@ -1252,6 +1270,164 @@ pub async fn timelock_async(
             let kd = kdf.ok_or(TimeLockError::ForbiddenAction("_at path: kdf must be Some"))?;
             return derive_key_scheduled_at_async(c, t, pr, fm, sl, kd).await;
         }
+    }
+}
+
+// ─── builder ─────────────────────────────────────────────────────────────────
+
+/// Fluent builder for [`timelock`] / [`timelock_async`] key derivation.
+///
+/// Provides a readable alternative to the 7-positional-argument `timelock()` function.
+/// Create a builder via [`TimelockBuilder::encrypt`] (encryption path, `_at`) or
+/// [`TimelockBuilder::decrypt`] (decryption path, `_now`), optionally configure
+/// it with setter methods, then call [`derive`](Self::derive) or
+/// [`derive_async`](Self::derive_async).
+///
+/// ## Encryption (key-at path)
+///
+/// All of `time`, `salts`, and `kdf` are **required**.  `cadence`, `precision`, and
+/// `format` are optional and fall back to sensible defaults:
+/// * `cadence` → [`TimeLockCadence::None`] (no calendar constraint)
+/// * `precision` → [`TimePrecision::Minute`]
+/// * `format` → [`TimeFormat::Hour24`]
+///
+/// ```no_run
+/// # use toolkit_zero::encryption::timelock::*;
+/// let salts = TimeLockSalts::generate();
+/// let kdf   = KdfPreset::Balanced.params();
+///
+/// let key = TimelockBuilder::encrypt()
+///     .time(TimeLockTime::new(14, 37).unwrap())
+///     .salts(salts)
+///     .kdf(kdf)
+///     .derive()
+///     .unwrap();
+/// ```
+///
+/// ## Decryption (key-now path)
+///
+/// Pass the [`TimeLockParams`] header stored in the ciphertext.  No other
+/// configuration is required; all settings are read from `params`.
+///
+/// ```no_run
+/// # use toolkit_zero::encryption::timelock::*;
+/// # let header: TimeLockParams = todo!();
+/// let key = TimelockBuilder::decrypt(header).derive().unwrap();
+/// ```
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+pub struct TimelockBuilder {
+    cadence:   Option<TimeLockCadence>,
+    time:      Option<TimeLockTime>,
+    precision: Option<TimePrecision>,
+    format:    Option<TimeFormat>,
+    salts:     Option<TimeLockSalts>,
+    kdf:       Option<KdfParams>,
+    params:    Option<TimeLockParams>,
+}
+
+#[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+impl TimelockBuilder {
+    /// Begin configuring an **encryption** (key-at) derivation.
+    ///
+    /// Requires `enc-timelock-keygen-input` (or async variant) to call
+    /// [`derive`](Self::derive) / [`derive_async`](Self::derive_async).
+    #[cfg(any(feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-input"))]
+    pub fn encrypt() -> Self {
+        Self {
+            cadence:   Some(TimeLockCadence::None),
+            time:      None,
+            precision: Some(TimePrecision::Minute),
+            format:    Some(TimeFormat::Hour24),
+            salts:     None,
+            kdf:       None,
+            params:    None,
+        }
+    }
+
+    /// Begin configuring a **decryption** (key-now) derivation from a stored header.
+    ///
+    /// Requires `enc-timelock-keygen-now` (or async variant) to call
+    /// [`derive`](Self::derive) / [`derive_async`](Self::derive_async).
+    #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-async-keygen-now"))]
+    pub fn decrypt(params: TimeLockParams) -> Self {
+        Self {
+            cadence:   None,
+            time:      None,
+            precision: None,
+            format:    None,
+            salts:     None,
+            kdf:       None,
+            params:    Some(params),
+        }
+    }
+
+    /// Set the calendar cadence (default: `TimeLockCadence::None`).
+    pub fn cadence(mut self, cadence: TimeLockCadence) -> Self {
+        self.cadence = Some(cadence);
+        self
+    }
+
+    /// Set the explicit lock time (required for the encryption path).
+    pub fn time(mut self, time: TimeLockTime) -> Self {
+        self.time = Some(time);
+        self
+    }
+
+    /// Set the time precision (default: `TimePrecision::Minute`).
+    pub fn precision(mut self, precision: TimePrecision) -> Self {
+        self.precision = Some(precision);
+        self
+    }
+
+    /// Set the clock format (default: `TimeFormat::Hour24`).
+    pub fn format(mut self, format: TimeFormat) -> Self {
+        self.format = Some(format);
+        self
+    }
+
+    /// Set the KDF salts (required for the encryption path).
+    pub fn salts(mut self, salts: TimeLockSalts) -> Self {
+        self.salts = Some(salts);
+        self
+    }
+
+    /// Set the KDF parameters (required for the encryption path).
+    pub fn kdf(mut self, kdf: KdfParams) -> Self {
+        self.kdf = Some(kdf);
+        self
+    }
+
+    /// Derive the key synchronously.
+    ///
+    /// Delegates directly to [`timelock`].
+    #[cfg(any(feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input"))]
+    pub fn derive(self) -> Result<TimeLockKey, TimeLockError> {
+        timelock(
+            self.cadence,
+            self.time,
+            self.precision,
+            self.format,
+            self.salts,
+            self.kdf,
+            self.params,
+        )
+    }
+
+    /// Derive the key asynchronously.
+    ///
+    /// Delegates directly to [`timelock_async`]. The blocking KDF work is
+    /// offloaded to a Tokio blocking thread.
+    #[cfg(any(feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+    pub async fn derive_async(self) -> Result<TimeLockKey, TimeLockError> {
+        timelock_async(
+            self.cadence,
+            self.time,
+            self.precision,
+            self.format,
+            self.salts,
+            self.kdf,
+            self.params,
+        ).await
     }
 }
 

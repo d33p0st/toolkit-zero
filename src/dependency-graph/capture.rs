@@ -13,9 +13,6 @@
 //! * [`parse`] — deserialises the embedded JSON into a typed [`BuildTimeFingerprintData`]
 //!   struct. Returns [`CaptureError`] if the JSON is malformed or a required
 //!   section is absent.
-//! * [`as_bytes`] — returns the raw JSON bytes. Because the JSON is normalised
-//!   and sorted at build time, the returned bytes are stable and deterministic
-//!   across equivalent builds.
 //!
 //! ## Concerns
 //!
@@ -35,7 +32,7 @@ use serde_json::Value;
 #[derive(Debug)]
 pub enum CaptureError {
     /// The embedded JSON is not valid.
-    InvalidJson(String),
+    InvalidJson(serde_json::Error),
     /// A required top-level section is missing.
     MissingSection(&'static str),
 }
@@ -49,7 +46,14 @@ impl std::fmt::Display for CaptureError {
     }
 }
 
-impl std::error::Error for CaptureError {}
+impl std::error::Error for CaptureError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidJson(e)    => Some(e),
+            Self::MissingSection(_) => None,
+        }
+    }
+}
 
 // ─── typed data ───────────────────────────────────────────────────────────────
 
@@ -101,10 +105,10 @@ pub struct BuildInfo {
 /// `include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"))`.
 pub fn parse(json: &str) -> Result<BuildTimeFingerprintData, CaptureError> {
     let root: Value = serde_json::from_str(json)
-        .map_err(|e| CaptureError::InvalidJson(e.to_string()))?;
+        .map_err(CaptureError::InvalidJson)?;
 
     let obj = root.as_object()
-        .ok_or(CaptureError::InvalidJson("root is not an object".into()))?;
+        .ok_or(CaptureError::MissingSection("root (expected JSON object)"))? ;
 
     // ── package ───────────────────────────────────────────────────────────────
     let pkg = obj.get("package")
@@ -162,23 +166,6 @@ pub fn parse(json: &str) -> Result<BuildTimeFingerprintData, CaptureError> {
 
     Ok(BuildTimeFingerprintData { package, build, cargo_lock_sha256, deps, source })
 }
-
-/// Return the raw bytes of the fingerprint JSON string.
-///
-/// Because `fingerprint.json` is already normalised (sorted keys, no whitespace,
-/// no absolute paths) at build time, the returned bytes are stable and
-/// deterministic across equivalent builds.
-///
-/// ```rust,ignore
-/// const BUILD_TIME_FINGERPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
-///
-/// let bytes: &[u8] = toolkit_zero::dependency_graph::capture::as_bytes(BUILD_TIME_FINGERPRINT);
-/// ```
-pub fn as_bytes(json: &str) -> &[u8] {
-    json.as_bytes()
-}
-
-// ─── attribute macro ──────────────────────────────────────────────────────────
 
 /// Embed and bind the build-time `fingerprint.json` in one expression.
 ///
