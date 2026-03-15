@@ -34,7 +34,7 @@
 //! #[derive(Serialize)] struct Filter { page: u32 }
 //!
 //! # async fn run() -> Result<(), reqwest::Error> {
-//! let client = Client::new(Target::Localhost(8080));
+//! let client = Client::new_async(Target::Localhost(8080));
 //!
 //! // Plain async GET
 //! let items: Vec<Item> = client.get("/items").send().await?;

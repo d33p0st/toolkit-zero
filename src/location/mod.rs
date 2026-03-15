@@ -17,16 +17,32 @@
 //!
 //! [Web Geolocation API]: https://developer.mozilla.org/en-US/docs/Web/API/Geolocation_API
 //!
+//! # Attribute macro
+//!
+//! The [`browser::browser`] attribute macro wraps the call to
+//! [`browser::__location__`] or [`browser::__location_async__`] and builds the
+//! [`browser::PageTemplate`] for you.
+//!
+//! ```rust,ignore
+//! use toolkit_zero::location::browser::{browser, LocationData, LocationError};
+//!
+//! async fn run() -> Result<LocationData, LocationError> {
+//!     #[browser(title = "My App")]
+//!     fn loc() {}
+//!     Ok(loc)
+//! }
+//! ```
+//!
 //! # Feature flag
 //!
-//! This module is compiled when the `location` (or `location-native`) feature is enabled:
+//! This module is compiled when the `location` (or `location-browser`) feature is enabled:
 //!
 //! ```toml
 //! [dependencies]
 //! toolkit-zero = { version = "...", features = ["location"] }
 //! ```
 
-#[cfg(feature = "location-native")]
+#[cfg(feature = "location-browser")]
 pub mod browser;
 
 #[cfg(feature = "backend-deps")]

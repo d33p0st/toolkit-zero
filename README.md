@@ -50,6 +50,7 @@ A feature-selective Rust utility crate. Declare only the modules your project re
 
 - [Blocking usage](#blocking-usage)
 - [Async usage](#async-usage)
+- [`#[browser]` attribute macro](#browser-attribute-macro)
 - [Page templates](#page-templates)
 - [LocationData fields](#locationdata-fields)
 - [Errors](#locationerror-variants)
@@ -66,12 +67,13 @@ A feature-selective Rust utility crate. Declare only the modules your project re
 </details>
 
 <details>
-<summary>8. <a href="#dependency-graph--ironprint">Dependency Graph — IronPrint</a></summary>
+<summary>8. <a href="#dependency-graph--buildtimefingerprint">Dependency Graph — BuildTimeFingerprint</a></summary>
 
 - [Sections captured](#sections-captured)
 - [Setup](#setup)
-- [Usage](#ironprint-usage)
+- [Usage](#buildtimefingerprint-usage)
 - [Debug export](#debug-export)
+- [`#[dependencies]` attribute macro](#dependencies-attribute-macro)
 - [Risks and considerations](#risks-and-considerations)
 
 </details>
@@ -94,8 +96,8 @@ A feature-selective Rust utility crate. Declare only the modules your project re
 | `socket-server` | Typed HTTP server builder (includes `serialization`) | `toolkit_zero::socket::server` |
 | `socket-client` | Typed HTTP client builder (includes `serialization`) | `toolkit_zero::socket::client` |
 | `socket` | Both `socket-server` and `socket-client` | both socket sub-modules |
-| `location-native` | Browser-based geolocation (includes `socket-server`) | `toolkit_zero::location::browser` |
-| `location` | Alias for `location-native` | `toolkit_zero::location` |
+| `location-browser` | Browser-based geolocation (includes `socket-server`) | `toolkit_zero::location::browser` |
+| `location` | Alias for `location-browser` | `toolkit_zero::location` |
 | `enc-timelock-keygen-now` | Time-lock key derivation from the system clock | `toolkit_zero::encryption::timelock` |
 | `enc-timelock-keygen-input` | Time-lock key derivation from a caller-supplied time | `toolkit_zero::encryption::timelock` |
 | `enc-timelock-async-keygen-now` | Async variant of `enc-timelock-keygen-now` | `toolkit_zero::encryption::timelock` |
@@ -126,10 +128,10 @@ cargo add toolkit-zero --features location
 # Full time-lock encryption suite
 cargo add toolkit-zero --features encryption
 
-# Attach IronPrint fingerprint in build.rs
+# Attach build-time fingerprint in build.rs
 cargo add toolkit-zero --build --features dependency-graph-build
 
-# Read IronPrint fingerprint at runtime
+# Read build-time fingerprint at runtime
 cargo add toolkit-zero --features dependency-graph-capture
 
 # Re-export deps alongside socket-server
@@ -144,14 +146,19 @@ Feature: `serialization`
 
 The VEIL cipher transforms any [`bincode`](https://docs.rs/bincode)-encodable value into an opaque, key-dependent byte sequence. The output carries no recognisable structure; every output byte is a function of the complete input and the key. Without the exact key, the transformation cannot be reversed.
 
+Keys are moved into `seal`/`open` and wrapped in `Zeroizing<String>` internally, wiping them from memory on drop.
+
 **Entry points:**
 
-| Function | Direction |
+| Function / Macro | Direction |
 |---|---|
 | `toolkit_zero::serialization::seal(&value, key)` | struct → `Vec<u8>` |
 | `toolkit_zero::serialization::open::<T>(&bytes, key)` | `Vec<u8>` → struct |
+| `#[serializable]` | derive `Encode+Decode` + inject `.seal()` / `::open()` |
+| `#[serialize(...)]` | inline seal to a variable or file |
+| `#[deserialize(...)]` | inline open from a variable blob or file |
 
-`key` is `Option<&str>`.  Pass `None` to use the built-in default key.
+`key` is `Option<String>`. Pass `None` to use the built-in default key.
 
 **Types must derive `Encode` and `Decode`:**
 
@@ -170,10 +177,53 @@ let blob = seal(&cfg, None).unwrap();
 let back: Config = open(&blob, None).unwrap();
 assert_eq!(cfg, back);
 
-// With a custom shared key
-let blob2 = seal(&cfg, Some("my-secret")).unwrap();
-let back2: Config = open(&blob2, Some("my-secret")).unwrap();
+// With a custom shared key (moved in, zeroized on drop)
+let blob2 = seal(&cfg, Some("my-secret".to_string())).unwrap();
+let back2: Config = open(&blob2, Some("my-secret".to_string())).unwrap();
 assert_eq!(cfg, back2);
+```
+
+**`#[serializable]` — inject methods directly on a struct or enum:**
+
+```rust
+use toolkit_zero::serialization::serializable;
+
+#[serializable]
+struct Config { host: String, port: u16 }
+
+let c = Config { host: "localhost".into(), port: 8080 };
+let blob = c.seal(None).unwrap();
+let back = Config::open(&blob, None).unwrap();
+
+// Per-field encrypted helpers:
+#[serializable]
+struct Creds {
+    pub user: String,
+    #[serializable(key = "field-secret")]
+    pub password: String,
+}
+// → Creds::seal_password(&self), Creds::open_password(bytes)
+```
+
+**`#[serialize]` / `#[deserialize]` — inline seal/open as statements:**
+
+```rust
+use toolkit_zero::serialization::{serialize, deserialize};
+
+// Variable mode
+#[serialize(cfg, key = my_key)]
+fn blob() -> Vec<u8> {}
+// expands to: let blob: Vec<u8> = seal(&cfg, Some(my_key))?;
+
+// File write mode
+#[serialize(cfg, path = "config.bin")]
+fn _() {}
+// expands to: fs::write("config.bin", seal(&cfg, None)?)?;
+
+// Deserialize from file
+#[deserialize(path = "config.bin", key = my_key)]
+fn cfg() -> Config {}
+// expands to: let cfg: Config = open::<Config>(&fs::read("config.bin")?, Some(my_key))?;
 ```
 
 ---
@@ -705,7 +755,7 @@ The return type annotation on the `fn` is **required** — omitting it is a comp
 
 ## Location
 
-Feature: `location` (or `location-native`)
+Feature: `location` (or `location-browser`)
 
 Acquires the device's geographic coordinates by opening a locally served consent page in the system default browser. The browser requests location permission through the standard Web Geolocation API; on approval, the coordinates are submitted to the local HTTP server. The server shuts itself down once a result is received and returns the data to the caller.
 
@@ -742,6 +792,57 @@ async fn main() {
         Ok(data) => println!("lat={:.6}  lon={:.6}", data.latitude, data.longitude),
         Err(e)   => eprintln!("Error: {e}"),
     }
+}
+```
+
+### `#[browser]` attribute macro
+
+The `#[browser]` macro is a concise alternative to calling `__location__` /
+`__location_async__` directly. It replaces the decorated `fn` item with an
+inline location-capture statement. The function **name** becomes the binding;
+the `PageTemplate` is built from the macro arguments. A `?` propagates any
+`LocationError` to the enclosing function.
+
+All arguments are optional and may appear in any order:
+
+| Argument | Type | Notes |
+|---|---|---|
+| `sync` | flag | Use blocking `__location__`; default is `__location_async__().await` |
+| `tickbox` | flag | Use `PageTemplate::Tickbox`; incompatible with `html` |
+| `title = "…"` | string literal | Tab/heading title for Default or Tickbox |
+| `body = "…"` | string literal | Body paragraph text |
+| `consent = "…"` | string literal | Checkbox label (Tickbox only) |
+| `html = "…"` | string literal | `PageTemplate::Custom`; mutually exclusive with all other template args |
+
+```rust
+use toolkit_zero::location::browser::{browser, LocationData, LocationError};
+
+// Async, Default template — all built-in text
+async fn run1() -> Result<LocationData, LocationError> {
+    #[browser]
+    fn loc() {}
+    Ok(loc)
+}
+
+// Async, Tickbox with consent text
+async fn run2() -> Result<LocationData, LocationError> {
+    #[browser(tickbox, title = "Verify Location", consent = "I agree to share my location")]
+    fn loc() {}
+    Ok(loc)
+}
+
+// Async, completely custom HTML page
+async fn run3() -> Result<LocationData, LocationError> {
+    #[browser(html = "<!DOCTYPE html><html><body><h1>Grant access</h1>{}</body></html>")]
+    fn loc() {}
+    Ok(loc)
+}
+
+// Blocking, custom title
+fn run4() -> Result<LocationData, LocationError> {
+    #[browser(sync, title = "My App")]
+    fn loc() {}
+    Ok(loc)
 }
 ```
 
@@ -882,11 +983,11 @@ feature(s).
 
 ---
 
-## Dependency Graph — IronPrint
+## Dependency Graph — BuildTimeFingerprint
 
 Features: `dependency-graph-build` · `dependency-graph-capture`
 
-IronPrint attaches a normalised, deterministic snapshot of the build environment to the compiled binary. The snapshot is written to `$OUT_DIR/ironprint.json` at compile time and embedded via `include_str!`; no runtime I/O is required.
+BuildTimeFingerprint attaches a normalised, deterministic snapshot of the build environment to the compiled binary. The snapshot is written to `$OUT_DIR/fingerprint.json` at compile time and embedded via `include_str!`; no runtime I/O is required.
 
 The two features are intentionally independent so that each can be declared in the appropriate `Cargo.toml` section.
 
@@ -914,23 +1015,23 @@ toolkit-zero = { features = ["dependency-graph-build"] }
 
 ```rust
 fn main() {
-    toolkit_zero::dependency_graph::build::generate_ironprint()
-        .expect("ironprint generation failed");
+    toolkit_zero::dependency_graph::build::generate_fingerprint()
+        .expect("fingerprint generation failed");
     // see "Debug export" below for the optional export() call
 }
 ```
 
-### IronPrint usage
+### BuildTimeFingerprint usage
 
 Embed and read the snapshot in your binary:
 
 ```rust
 use toolkit_zero::dependency_graph::capture;
 
-const IRONPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/ironprint.json"));
+const BUILD_TIME_FINGERPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
 
 fn main() {
-    let data = capture::parse(IRONPRINT).expect("failed to parse ironprint");
+    let data = capture::parse(BUILD_TIME_FINGERPRINT).expect("failed to parse fingerprint");
 
     println!("{} v{}", data.package.name, data.package.version);
     println!("profile  : {}", data.build.profile);
@@ -943,12 +1044,12 @@ fn main() {
     }
 
     // raw bytes of the normalised JSON
-    let raw: &[u8] = capture::as_bytes(IRONPRINT);
+    let raw: &[u8] = capture::as_bytes(BUILD_TIME_FINGERPRINT);
     println!("{} bytes", raw.len());
 }
 ```
 
-**`IronprintData` fields:**
+**`BuildTimeFingerprintData` fields:**
 
 | Field | Type | Description |
 |---|---|---|
@@ -965,27 +1066,55 @@ fn main() {
 
 ### Debug export
 
-`export(enabled: bool)` writes a **pretty-printed** `ironprint.json` alongside the crate's `Cargo.toml` for local inspection. This file is distinct from the compact version written to `$OUT_DIR`; the binary always embeds the `$OUT_DIR` copy.
+`export(enabled: bool)` writes a **pretty-printed** `fingerprint.json` alongside the crate's `Cargo.toml` for local inspection. This file is distinct from the compact version written to `$OUT_DIR`; the binary always embeds the `$OUT_DIR` copy.
 
 Pass `cfg!(debug_assertions)` to suppress the file automatically in release builds:
 
 ```rust
 fn main() {
-    toolkit_zero::dependency_graph::build::generate_ironprint()
-        .expect("ironprint generation failed");
+    toolkit_zero::dependency_graph::build::generate_fingerprint()
+        .expect("fingerprint generation failed");
     toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
-        .expect("ironprint export failed");
+        .expect("fingerprint export failed");
 }
 ```
 
-> **Add `ironprint.json` to `.gitignore`.**  The exported file contains the full dependency graph, per-file source hashes, target triple, and compiler version. Although the contents are not secret, committing the file adds repository noise and may expose build-environment details beyond what is intended.
+> **Add `fingerprint.json` to `.gitignore`.**  The exported file contains the full dependency graph, per-file source hashes, target triple, and compiler version. Although the contents are not secret, committing the file adds repository noise and may expose build-environment details beyond what is intended.
+
+### `#[dependencies]` attribute macro
+
+The `#[dependencies]` macro is a concise alternative to the `include_str!` + `capture::parse()` boilerplate. It requires the `dependency-graph-capture` feature.
+
+Apply it to an empty `fn` inside a function body; the function name becomes the `let` binding:
+
+```rust
+use toolkit_zero::dependency_graph::capture::dependencies;
+
+fn show() -> Result<(), Box<dyn std::error::Error>> {
+    #[dependencies]          // → let data: BuildTimeFingerprintData = parse(...)?;
+    fn data() {}
+    println!("{} v{}", data.package.name, data.package.version);
+    Ok(())
+}
+
+fn raw_bytes() -> &'static [u8] {
+    #[dependencies(bytes)]   // → let raw: &'static [u8] = as_bytes(...);
+    fn raw() {}
+    raw
+}
+```
+
+| Form | Result type | Propagates `?` |
+|---|---|---|
+| `#[dependencies]` | `BuildTimeFingerprintData` | yes |
+| `#[dependencies(bytes)]` | `&'static [u8]` | no |
 
 ### Risks and considerations
 
 | Concern | Detail |
 |---|---|
 | **Not tamper-proof** | The fingerprint is embedded as plain text in the binary's read-only data section. Anyone with access to the binary can read it. It is informational, not a security boundary. |
-| **Export file exposure** | `export(true)` writes `ironprint.json` to the crate root. Add it to `.gitignore` to prevent accidental commits. |
+| **Export file exposure** | `export(true)` writes `fingerprint.json` to the crate root. Add it to `.gitignore` to prevent accidental commits. |
 | **Build-time overhead** | `cargo metadata` runs on every rebuild. The `cargo:rerun-if-changed` directives restrict this to changes in `src/`, `Cargo.toml`, or `Cargo.lock` — unchanged builds do not re-run. |
 | **Feature capture scope** | `build.features` captures the active features of the crate being built, not toolkit-zero's own features. |
 | **Absolute-path stripping** | `workspace_root`, `manifest_path`, `src_path`, `path`, and other machine-specific fields are removed from `cargo metadata` output. The fingerprint is stable across different machines and checkout locations. |
@@ -1001,7 +1130,7 @@ When combined with any other feature, `backend-deps` appends a `backend_deps` su
 
 | Module | Path | Re-exports |
 |---|---|---|
-| `serialization` | `toolkit_zero::serialization::backend_deps` | `bincode`, `base64` |
+| `serialization` | `toolkit_zero::serialization::backend_deps` | `bincode`, `base64`, `zeroize` |
 | `socket` (server side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `warp` |
 | `socket` (client side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
 | `location` | `toolkit_zero::location::backend_deps` | `tokio`, `serde`, `webbrowser`, `rand` |

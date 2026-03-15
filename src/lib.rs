@@ -14,7 +14,7 @@
 //! 4. [Socket — client](#socket--client)
 //! 5. [Location](#location)
 //! 6. [Encryption — Timelock](#encryption--timelock)
-//! 7. [Dependency Graph — IronPrint](#dependency-graph--ironprint)
+//! 7. [Dependency Graph — BuildTimeFingerprint](#dependency-graph--buildtimefingerprint)
 //! 8. [Backend deps](#backend-deps-1)
 //!
 //! ---
@@ -22,20 +22,20 @@
 //! ## Feature flags
 //!
 //! | Feature | Enables | Exposes |
-//! |---|---||---|
+//! |---|---|---|
 //! | `serialization` | VEIL cipher (seal / open) | [`serialization`] |
 //! | `socket-server` | VEIL + typed HTTP server builder | [`socket::server`] |
 //! | `socket-client` | VEIL + typed HTTP client builder | [`socket::client`] |
 //! | `socket` | Both `socket-server` and `socket-client` | both |
-//! | `location-native` | Browser-based geolocation | [`location::browser`] |
-//! | `location` | Alias for `location-native` | [`location`] |
+//! | `location-browser` | Browser-based geolocation | [`location::browser`] |
+//! | `location` | Alias for `location-browser` | [`location`] |
 //! | `enc-timelock-keygen-now` | Time-lock key derivation from the system clock | [`encryption::timelock::derive_key_now`] |
 //! | `enc-timelock-keygen-input` | Time-lock key derivation from a caller-supplied time | [`encryption::timelock::derive_key_at`] |
 //! | `enc-timelock-async-keygen-now` | Async variant of `enc-timelock-keygen-now` | [`encryption::timelock::derive_key_now_async`] |
 //! | `enc-timelock-async-keygen-input` | Async variant of `enc-timelock-keygen-input` | [`encryption::timelock::derive_key_at_async`] |
 //! | `encryption` | All four `enc-timelock-*` features | [`encryption::timelock`] |
-//! | `dependency-graph-build` | Attach a normalised dependency-graph snapshot (`ironprint.json`) at build time | [`dependency_graph::build`] |
-//! | `dependency-graph-capture` | Read the embedded `ironprint.json` snapshot at runtime | [`dependency_graph::capture`] |
+//! | `dependency-graph-build` | Attach a normalised dependency-graph snapshot (`fingerprint.json`) at build time | [`dependency_graph::build`] |
+//! | `dependency-graph-capture` | Read the embedded `fingerprint.json` snapshot at runtime | [`dependency_graph::capture`] |
 //! | `backend-deps` | Re-exports all third-party deps used by each active module | `*::backend_deps` |
 //!
 //! ```toml
@@ -58,11 +58,11 @@
 //! # Full time-lock encryption suite
 //! toolkit-zero = { version = "3", features = ["encryption"] }
 //!
-//! # Attach IronPrint fingerprint in build.rs
+//! # Attach build-time fingerprint in build.rs
 //! # [build-dependencies]
 //! toolkit-zero = { version = "3", features = ["dependency-graph-build"] }
 //!
-//! # Read IronPrint fingerprint at runtime
+//! # Read build-time fingerprint at runtime
 //! # [dependencies]
 //! toolkit-zero = { version = "3", features = ["dependency-graph-capture"] }
 //!
@@ -78,9 +78,20 @@
 //! key-dependent binary codec that transforms any [`bincode`]-encodable value
 //! into an opaque byte sequence and back.
 //!
+//! Keys are moved into [`serialization::seal`] / [`serialization::open`] and
+//! wrapped in `Zeroizing<String>` internally, wiping them from memory on drop.
+//!
 //! The two entry points are [`serialization::seal`] and [`serialization::open`].
 //! Every output byte is a function of the complete input and the key; without
 //! the exact key, the output cannot be reversed.
+//!
+//! Three attribute macros are also available via the `serialization` feature:
+//!
+//! | Macro | Purpose |
+//! |---|---|
+//! | [`serialization::serializable`] | derive `Encode+Decode` + inject `seal`/`open` methods |
+//! | [`serialization::serialize`] | inline seal to a variable or a file |
+//! | [`serialization::deserialize`] | inline open from a variable blob or a file |
 //!
 //! ```rust,ignore
 //! use toolkit_zero::serialization::{seal, open, Encode, Decode};
@@ -93,8 +104,8 @@
 //! let back: Point = open(&blob, None).unwrap();
 //! assert_eq!(p, back);
 //!
-//! let blob2 = seal(&p, Some("my-key")).unwrap();              // custom key
-//! let back2: Point = open(&blob2, Some("my-key")).unwrap();
+//! let blob2 = seal(&p, Some("my-key".to_string())).unwrap();              // custom key
+//! let back2: Point = open(&blob2, Some("my-key".to_string())).unwrap();
 //! assert_eq!(p, back2);
 //! ```
 //!
@@ -309,7 +320,7 @@
 //!
 //! ## Location
 //!
-//! The `location` (or `location-native`) feature provides browser-based geographic
+//! The `location` (or `location-browser`) feature provides browser-based geographic
 //! coordinate acquisition. A temporary HTTP server is bound on a randomly assigned
 //! local port, the system default browser is directed to a consent page, and the
 //! coordinates are submitted via the standard Web Geolocation API. The server
@@ -345,6 +356,42 @@
 //! a plain single-button page, a checkbox-gated variant, or a fully custom HTML
 //! document.
 //!
+//! ### `#[browser]` attribute macro
+//!
+//! The [`location::browser::browser`] attribute macro is a concise alternative
+//! to calling `__location__` / `__location_async__` directly. It replaces the
+//! decorated `fn` item with an inline location-capture statement; the function
+//! **name** becomes the binding that holds the resulting
+//! [`location::browser::LocationData`], and the [`location::browser::PageTemplate`]
+//! is built from the macro arguments.
+//!
+//! ```rust,ignore
+//! use toolkit_zero::location::browser::{browser, LocationData, LocationError};
+//!
+//! async fn get_location() -> Result<LocationData, LocationError> {
+//!     // async, plain Default template
+//!     #[browser]
+//!     fn loc() {}
+//!     Ok(loc)
+//! }
+//!
+//! async fn get_location_tickbox() -> Result<LocationData, LocationError> {
+//!     // async, Tickbox with consent text
+//!     #[browser(tickbox, title = "Verify Location", consent = "I agree")]
+//!     fn loc() {}
+//!     Ok(loc)
+//! }
+//!
+//! fn get_location_sync() -> Result<LocationData, LocationError> {
+//!     // blocking, custom title
+//!     #[browser(sync, title = "My App")]
+//!     fn loc() {}
+//!     Ok(loc)
+//! }
+//! ```
+//!
+//! See [`location::browser::browser`] for the full argument reference.
+//!
 //! ---
 //!
 //! ## Encryption — Timelock
@@ -373,7 +420,7 @@
 //! tuned per platform: `Balanced`, `Paranoid`, `BalancedMac`, `ParanoidMac`,
 //! `BalancedX86`, `ParanoidX86`, `BalancedArm`, `ParanoidArm`, and `Custom(KdfParams)`.
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use toolkit_zero::encryption::timelock::*;
 //!
 //! // Encryption side — caller sets the unlock time
@@ -407,26 +454,51 @@
 //!
 //! ---
 //!
-//! ## Dependency Graph — IronPrint
+//! ## Dependency Graph — BuildTimeFingerprint
 //!
 //! Two features; one for each side of the boundary.
 //!
 //! **`dependency-graph-build`** (goes in `[build-dependencies]`):
-//! [`dependency_graph::build::generate_ironprint`] runs `cargo metadata`, hashes
+//! [`dependency_graph::build::generate_fingerprint`] runs `cargo metadata`, hashes
 //! `Cargo.lock` and every `.rs` file under `src/`, captures the profile, target
 //! triple, rustc version, and active features, then writes a compact, normalised
-//! JSON document to `$OUT_DIR/ironprint.json`.
+//! JSON document to `$OUT_DIR/fingerprint.json`.
 //! [`dependency_graph::build::export`] optionally writes a pretty-printed copy
 //! alongside `Cargo.toml` for local inspection — pass `false` or
 //! `cfg!(debug_assertions)` to suppress it in release builds.
 //!
 //! **`dependency-graph-capture`** (goes in `[dependencies]`):
 //! [`dependency_graph::capture::parse`] deserialises the embedded snapshot into a
-//! typed [`dependency_graph::capture::IronprintData`] struct.
+//! typed [`dependency_graph::capture::BuildTimeFingerprintData`] struct.
 //! [`dependency_graph::capture::as_bytes`] returns the raw JSON bytes, which are
 //! stable and deterministic across equivalent builds.
 //!
-//! ### Sections captured in `ironprint.json`
+//! ### `#[dependencies]` attribute macro
+//!
+//! The [`dependency_graph::capture::dependencies`] attribute macro is a concise
+//! alternative to the manual `include_str!` + `parse()` boilerplate. Apply it to
+//! an empty `fn`; the function name becomes the binding.
+//!
+//! ```rust,ignore
+//! use toolkit_zero::dependency_graph::capture::dependencies;
+//!
+//! fn show() -> Result<(), Box<dyn std::error::Error>> {
+//!     #[dependencies]             // → let data: BuildTimeFingerprintData = parse(...)?;
+//!     fn data() {}
+//!     println!("{} v{}", data.package.name, data.package.version);
+//!     Ok(())
+//! }
+//!
+//! fn raw() -> &'static [u8] {
+//!     #[dependencies(bytes)]      // → let raw: &'static [u8] = as_bytes(...);
+//!     fn raw() {}
+//!     raw
+//! }
+//! ```
+//!
+//! See [`dependency_graph::capture::dependencies`] for the full syntax reference.
+//!
+//! ### Sections captured in `fingerprint.json`
 //!
 //! | Section | Contents |
 //! |---|---|
@@ -450,11 +522,11 @@
 //!
 //! ```rust,ignore
 //! fn main() {
-//!     toolkit_zero::dependency_graph::build::generate_ironprint()
-//!         .expect("ironprint generation failed");
+//!     toolkit_zero::dependency_graph::build::generate_fingerprint()
+//!         .expect("fingerprint generation failed");
 //!     // optional: pretty-print to crate root for local inspection
 //!     toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
-//!         .expect("ironprint export failed");
+//!         .expect("fingerprint export failed");
 //! }
 //! ```
 //!
@@ -463,15 +535,15 @@
 //! ```rust,ignore
 //! use toolkit_zero::dependency_graph::capture;
 //!
-//! const IRONPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/ironprint.json"));
+//! const BUILD_TIME_FINGERPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
 //!
 //! fn main() {
-//!     let data = capture::parse(IRONPRINT).expect("failed to parse ironprint");
+//!     let data = capture::parse(BUILD_TIME_FINGERPRINT).expect("failed to parse fingerprint");
 //!     println!("{} v{}", data.package.name, data.package.version);
 //!     println!("target : {}", data.build.target);
 //!     println!("lock   : {}", data.cargo_lock_sha256);
 //!
-//!     let raw = capture::as_bytes(IRONPRINT);
+//!     let raw = capture::as_bytes(BUILD_TIME_FINGERPRINT);
 //!     println!("{} bytes", raw.len());
 //! }
 //! ```
@@ -482,7 +554,7 @@
 //!   binary's read-only data section and is readable by anyone with access to
 //!   the binary. It is informational in nature; it does not constitute a
 //!   security boundary.
-//! * **Export file** — `export(true)` writes `ironprint.json` to the crate root.
+//! * **Export file** — `export(true)` writes `fingerprint.json` to the crate root.
 //!   Add it to `.gitignore` to prevent accidental commits.
 //! * **Build-time overhead** — `cargo metadata` runs on every rebuild triggered
 //!   by the `cargo:rerun-if-changed` directives (changes to `src/`, `Cargo.toml`,
@@ -505,7 +577,7 @@
 //!
 //! | Module | Path | Re-exports |
 //! |---|---|---|
-//! | serialization | [`serialization::backend_deps`] | `bincode`, `base64` |
+//! | serialization | [`serialization::backend_deps`] | `bincode`, `base64`, `zeroize` |
 //! | socket (server) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `warp` |
 //! | socket (client) | [`socket::backend_deps`] | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
 //! | location | [`location::backend_deps`] | `tokio`, `serde`, `webbrowser`, `rand` |
@@ -519,7 +591,7 @@
 #[cfg(any(feature = "socket", feature = "socket-server", feature = "socket-client"))]
 pub mod socket;
 
-#[cfg(any(feature = "location", feature = "location-native"))]
+#[cfg(any(feature = "location", feature = "location-browser"))]
 pub mod location;
 
 #[cfg(feature = "serialization")]

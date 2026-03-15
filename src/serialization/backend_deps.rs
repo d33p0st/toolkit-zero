@@ -5,3 +5,4 @@
 
 pub use bincode;
 pub use base64;
+pub use zeroize;

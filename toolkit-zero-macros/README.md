@@ -10,12 +10,14 @@ Procedural macros for [`toolkit-zero`](https://crates.io/crates/toolkit-zero).
 > |---|---|---|---|
 > | `#[mechanism]` | `socket-server` | `socket-server` | `toolkit_zero::socket::server::mechanism` |
 > | `#[request]` | `socket-client` | `socket-client` | `toolkit_zero::socket::client::request` |
+> | `#[serializable]` | `serialization` | `serialization` | `toolkit_zero::serialization::serializable` |
+> | `#[serialize]` | `serialization` | `serialization` | `toolkit_zero::serialization::serialize` |
+> | `#[deserialize]` | `serialization` | `serialization` | `toolkit_zero::serialization::deserialize` |
 >
-> Both are also available via `toolkit_zero::socket::prelude::*`.
+> `#[mechanism]` / `#[request]` are also available via `toolkit_zero::socket::prelude::*`.
 >
-> The `toolkit-zero-macros/socket-server` and `toolkit-zero-macros/socket-client` feature
-> gates are automatically activated by the corresponding `toolkit-zero` features — you do
-> not need to set them manually.
+> Feature gates are automatically activated by the corresponding `toolkit-zero` features —
+> you do not need to set them manually.
 
 ---
 
@@ -167,6 +169,122 @@ async fn example() -> Result<(), reqwest::Error> {
 
 ---
 
+## `#[serializable]` — derive + inject seal/open methods
+
+Automatically derives `bincode::Encode + bincode::Decode` on a struct or enum and
+injects `.seal(key)` / `::open(bytes, key)` methods. Field-level
+`#[serializable(key = "...")]` additionally generates per-field `seal_<field>` /
+`open_<field>` helpers with a hardcoded key.
+
+### Syntax
+
+```text
+#[serializable]
+struct Foo { ... }
+
+#[serializable]
+enum Bar { ... }
+
+#[serializable]
+struct Creds {
+    pub user: String,
+    #[serializable(key = "field-key")]
+    pub password: String,   // → seal_password / open_password
+}
+```
+
+### Injected methods
+
+```rust
+// Struct-level
+fn seal(&self, key: Option<String>) -> Result<Vec<u8>, SerializationError>
+fn open(bytes: &[u8], key: Option<String>) -> Result<Self, SerializationError>
+
+// Per annotated field
+fn seal_<field>(&self) -> Result<Vec<u8>, SerializationError>
+fn open_<field>(bytes: &[u8]) -> Result<FieldType, SerializationError>
+```
+
+### Example
+
+```rust
+use toolkit_zero::serialization::serializable;
+
+#[serializable]
+struct Config { host: String, port: u16 }
+
+let c = Config { host: "localhost".into(), port: 8080 };
+let blob = c.seal(None).unwrap();
+let back = Config::open(&blob, None).unwrap();
+```
+
+---
+
+## `#[serialize]` — inline seal statement
+
+Replaces a `fn` item with a seal statement. Two modes:
+
+- **Variable mode** — fn name → binding name, return type → type annotation (required).
+- **File write mode** — presence of `path = "..."` → `fs::write(path, seal(...)?)?`.
+
+### Syntax
+
+```text
+#[serialize(expr)]                              // variable, default key
+#[serialize(expr, key = key_expr)]              // variable, custom key
+#[serialize(expr, path = "file.bin")]           // file write, default key
+#[serialize(expr, path = "file.bin", key = k)]  // file write, custom key
+```
+
+### Example
+
+```rust
+use toolkit_zero::serialization::serialize;
+
+#[serialize(cfg, key = my_key)]
+fn blob() -> Vec<u8> {}
+// expands to: let blob: Vec<u8> = seal(&cfg, Some(my_key))?;
+
+#[serialize(cfg, path = "config.bin")]
+fn _() {}
+// expands to: fs::write("config.bin", seal(&cfg, None)?)?;
+```
+
+---
+
+## `#[deserialize]` — inline open statement
+
+Replaces a `fn` item with an open statement. The return type annotation is required.
+Two modes:
+
+- **Variable mode** — open from a blob expression in scope.
+- **File read mode** — presence of `path = "..."` → `open(&fs::read(path)?, ...)`.
+
+### Syntax
+
+```text
+#[deserialize(blob_expr)]                       // variable, default key
+#[deserialize(blob_expr, key = key_expr)]       // variable, custom key
+#[deserialize(path = "file.bin")]               // file read, default key
+#[deserialize(path = "file.bin", key = k)]      // file read, custom key
+```
+
+### Example
+
+```rust
+use toolkit_zero::serialization::deserialize;
+
+#[deserialize(blob, key = my_key)]
+fn config() -> Config {}
+// expands to: let config: Config = open::<Config>(&blob, Some(my_key))?;
+
+#[deserialize(path = "config.bin")]
+fn config() -> Config {}
+// expands to: let config: Config = open::<Config>(&fs::read("config.bin")?, None)?;
+```
+
+---
+
 ## Usage
 
 ```toml
@@ -177,155 +295,22 @@ toolkit-zero = { version = "3", features = ["socket-server"] }
 # Client-side macro
 toolkit-zero = { version = "3", features = ["socket-client"] }
 
-# Both
-toolkit-zero = { version = "3", features = ["socket"] }
+# Serialization macros
+toolkit-zero = { version = "3", features = ["serialization"] }
+
+# All socket + serialization
+toolkit-zero = { version = "3", features = ["socket", "serialization"] }
 ```
 
 ```rust
 // Server
 use toolkit_zero::socket::server::mechanism;
-// or
-use toolkit_zero::socket::prelude::*;  // includes both mechanism and request
-
 // Client
 use toolkit_zero::socket::client::request;
-// or
+// Serialization
+use toolkit_zero::serialization::{serializable, serialize, deserialize};
+// or all socket
 use toolkit_zero::socket::prelude::*;
-```
-
----
-
-## License
-
-MIT — same as `toolkit-zero`.
-
-
----
-
-## What this crate provides
-
-A single attribute macro — `#[mechanism]` — that is a concise shorthand for
-the `toolkit-zero` socket-server route builder chain.
-
-Instead of:
-
-```rust
-server.mechanism(
-    ServerMechanism::post("/items")
-        .json::<NewItem>()
-        .onconnect(|body: NewItem| async move {
-            reply!(json => Item { id: 1, name: body.name }, status => Status::Created)
-        })
-);
-```
-
-you write:
-
-```rust
-#[mechanism(server, POST, "/items", json)]
-async fn create_item(body: NewItem) {
-    reply!(json => Item { id: 1, name: body.name }, status => Status::Created)
-}
-```
-
-The macro expands to the exact same `server.mechanism(…)` statement in-place.
-The function name is discarded; the body is transplanted verbatim into the
-`.onconnect(…)` closure.
-
----
-
-## Usage
-
-Add `toolkit-zero` — **not** this crate — to your `Cargo.toml`:
-
-```toml
-[dependencies]
-toolkit-zero = { version = "3", features = ["socket-server"] }
-```
-
-Then import the macro from the server module:
-
-```rust
-use toolkit_zero::socket::server::mechanism;
-// or
-use toolkit_zero::socket::prelude::*;
-```
-
----
-
-## Supported forms
-
-| Attribute | Function parameters |
-|---|---|
-| `#[mechanism(server, METHOD, "/path")]` | `()` |
-| `#[mechanism(server, METHOD, "/path", json)]` | `(body: T)` |
-| `#[mechanism(server, METHOD, "/path", query)]` | `(params: T)` |
-| `#[mechanism(server, METHOD, "/path", encrypted(key))]` | `(body: T)` |
-| `#[mechanism(server, METHOD, "/path", encrypted_query(key))]` | `(params: T)` |
-| `#[mechanism(server, METHOD, "/path", state(expr))]` | `(state: S)` |
-| `#[mechanism(server, METHOD, "/path", state(expr), json)]` | `(state: S, body: T)` |
-| `#[mechanism(server, METHOD, "/path", state(expr), query)]` | `(state: S, params: T)` |
-| `#[mechanism(server, METHOD, "/path", state(expr), encrypted(key))]` | `(state: S, body: T)` |
-| `#[mechanism(server, METHOD, "/path", state(expr), encrypted_query(key))]` | `(state: S, params: T)` |
-
-Valid HTTP methods: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`.
-
-The keywords after the path (`json`, `query`, `state`, `encrypted`,
-`encrypted_query`) may appear in **any order**.
-
----
-
-## Full example
-
-```rust
-use toolkit_zero::socket::server::{Server, mechanism, reply, Status};
-use toolkit_zero::socket::SerializationKey;
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-
-#[derive(Deserialize, Serialize, Clone)] struct Item    { id: u32, name: String }
-#[derive(Deserialize)]                   struct NewItem  { name: String }
-#[derive(Deserialize)]                   struct Filter   { page: u32 }
-
-#[tokio::main]
-async fn main() {
-    let mut server = Server::default();
-    let db: Arc<Mutex<Vec<Item>>> = Arc::new(Mutex::new(vec![]));
-
-    // Plain GET
-    #[mechanism(server, GET, "/health")]
-    async fn health() { reply!() }
-
-    // JSON body
-    #[mechanism(server, POST, "/items", json)]
-    async fn create(body: NewItem) {
-        reply!(json => Item { id: 1, name: body.name }, status => Status::Created)
-    }
-
-    // Query params
-    #[mechanism(server, GET, "/items", query)]
-    async fn list(filter: Filter) {
-        let _ = filter.page;
-        reply!()
-    }
-
-    // State + JSON
-    #[mechanism(server, POST, "/items/add", state(db.clone()), json)]
-    async fn add(db: Arc<Mutex<Vec<Item>>>, body: NewItem) {
-        let id = db.lock().unwrap().len() as u32 + 1;
-        let item = Item { id, name: body.name };
-        db.lock().unwrap().push(item.clone());
-        reply!(json => item, status => Status::Created)
-    }
-
-    // VEIL-encrypted body
-    #[mechanism(server, POST, "/secure", encrypted(SerializationKey::Default))]
-    async fn secure(body: NewItem) {
-        reply!(json => Item { id: 99, name: body.name })
-    }
-
-    server.serve(([127, 0, 0, 1], 8080)).await;
-}
 ```
 
 ---

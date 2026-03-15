@@ -1619,3 +1619,40 @@ mod tests {
         );
     }
 }
+
+// ─── attribute macro re-export ────────────────────────────────────────────────
+
+/// Concise attribute macro for deriving a time-locked key inline.
+///
+/// Replaces the decorated `fn` with a call to [`timelock`] (sync) or
+/// [`timelock_async`] (async, add the `async` flag). See
+/// [`toolkit_zero_macros::timelock`] for the full argument reference.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use toolkit_zero::encryption::timelock::*;
+///
+/// // Encryption — derive for 14:37 with Minute precision.
+/// fn encrypt_key() -> Result<TimeLockKey, TimeLockError> {
+///     let salts = TimeLockSalts::generate();
+///     let kdf   = KdfPreset::Balanced.params();
+///     #[timelock(precision = Minute, format = Hour24, time(14, 37), salts = salts, kdf = kdf)]
+///     fn key() {}
+///     Ok(key)
+/// }
+///
+/// // Decryption — re-derive from a stored header.
+/// fn decrypt_key(header: TimeLockParams) -> Result<TimeLockKey, TimeLockError> {
+///     #[timelock(params = header)]
+///     fn key() {}
+///     Ok(key)
+/// }
+/// ```
+#[cfg(any(
+    feature = "enc-timelock-keygen-now",
+    feature = "enc-timelock-keygen-input",
+    feature = "enc-timelock-async-keygen-now",
+    feature = "enc-timelock-async-keygen-input",
+))]
+pub use toolkit_zero_macros::timelock;

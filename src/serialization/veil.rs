@@ -10,8 +10,7 @@ use bincode::{
     encode_to_vec, decode_from_slice,
     Encode, Decode,
     error::{EncodeError, DecodeError},
-};
-
+};use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 // ─── public error type ────────────────────────────────────────────────────────
 
 /// Errors returned by [`seal`] and [`open`].
@@ -59,14 +58,14 @@ const BLOCK: usize = 16;
 ///
 /// Returns [`SerializationError::Encode`] if `bincode` cannot serialize the
 /// value.
-pub fn seal<T: Encode>(value: &T, key: Option<&str>) -> Result<Vec<u8>, SerializationError> {
-    let key = key.unwrap_or(DEFAULT_KEY);
+pub fn seal<T: Encode>(value: &T, key: Option<String>) -> Result<Vec<u8>, SerializationError> {
+    let key: Zeroizing<String> = Zeroizing::new(key.unwrap_or_else(|| DEFAULT_KEY.to_string()));
 
-    // Step 0: struct → raw bytes via bincode
-    let plain = encode_to_vec(value, standard())?;
+    // Step 0: struct → raw bytes via bincode, wrapped for secure erasure
+    let plain: Zeroizing<Vec<u8>> = Zeroizing::new(encode_to_vec(value, standard())?);
 
     // Steps 1—5: VEIL forward transform
-    let cipher = veil_encrypt(&plain, key);
+    let cipher = veil_encrypt(&*plain, key.as_str());
 
     // Outer bincode framing: Vec<u8> → length-prefixed blob
     let blob = encode_to_vec(&cipher, standard())?;
@@ -81,17 +80,17 @@ pub fn seal<T: Encode>(value: &T, key: Option<&str>) -> Result<Vec<u8>, Serializ
 ///
 /// Returns [`SerializationError::Decode`] if the blob is malformed or the
 /// key is incorrect.
-pub fn open<T: Decode<()>>(blob: &[u8], key: Option<&str>) -> Result<T, SerializationError> {
-    let key = key.unwrap_or(DEFAULT_KEY);
+pub fn open<T: Decode<()>>(blob: &[u8], key: Option<String>) -> Result<T, SerializationError> {
+    let key: Zeroizing<String> = Zeroizing::new(key.unwrap_or_else(|| DEFAULT_KEY.to_string()));
 
     // Outer bincode unframing
     let (cipher, _): (Vec<u8>, _) = decode_from_slice(blob, standard())?;
 
-    // Steps 5—1 reversed
-    let plain = veil_decrypt(&cipher, key)?;
+    // Steps 5—1 reversed — returns Zeroizing<Vec<u8>> for secure erasure
+    let plain = veil_decrypt(&cipher, key.as_str())?;
 
     // raw bytes → struct via bincode
-    let (value, _): (T, _) = decode_from_slice(&plain, standard())?;
+    let (value, _): (T, _) = decode_from_slice(&plain[..], standard())?;
     Ok(value)
 }
 
@@ -122,19 +121,20 @@ fn veil_encrypt(plain: &[u8], key: &str) -> Vec<u8> {
 
 // ─── VEIL reverse (decrypt) ──────────────────────────────────────────────────
 
-fn veil_decrypt(cipher: &[u8], key: &str) -> Result<Vec<u8>, SerializationError> {
+fn veil_decrypt(cipher: &[u8], key: &str) -> Result<Zeroizing<Vec<u8>>, SerializationError> {
     let ks = KeySchedule::new(key);
 
-    let mut buf = cipher.to_vec();
+    // Wrap in Zeroizing so plaintext is wiped when this Vec is dropped
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(cipher.to_vec());
 
     // 5 reverse: un-shuffle bytes within each 16-byte block
-    block_shuffle_reverse(&mut buf, &ks);
+    block_shuffle_reverse(&mut *buf, &ks);
 
     // 4 reverse: undo sequential accumulator
-    block_diffuse_reverse(&mut buf);
+    block_diffuse_reverse(&mut *buf);
 
     // 3 reverse: undo position mixing
-    position_mix_reverse(&mut buf);
+    position_mix_reverse(&mut *buf);
 
     // 2 reverse: XOR again with same key-stream (XOR is its own inverse)
     for (i, b) in buf.iter_mut().enumerate() {
@@ -154,6 +154,7 @@ fn veil_decrypt(cipher: &[u8], key: &str) -> Result<Vec<u8>, SerializationError>
 // All keying material is derived from a FNV-1a hash of the key string fed into
 // a splitmix64 PRNG.  No standard crypto hash or cipher is used.
 
+#[derive(Zeroize, ZeroizeOnDrop)]
 struct KeySchedule {
     /// Forward S-box: substitution table indexed by plaintext byte.
     sbox:     [u8; 256],
@@ -407,8 +408,8 @@ mod tests {
     #[test]
     fn round_trip_custom_key() {
         let p = Point { x: 42.0, y: 0.001, label: "custom".into() };
-        let blob = seal(&p, Some("hunter2")).unwrap();
-        let back: Point = open(&blob, Some("hunter2")).unwrap();
+        let blob = seal(&p, Some("hunter2".to_string())).unwrap();
+        let back: Point = open(&blob, Some("hunter2".to_string())).unwrap();
         assert_eq!(p, back);
     }
 
@@ -419,18 +420,18 @@ mod tests {
             inner: Point { x: -1.0, y: 2.5, label: "nested".into() },
             tags: vec!["a".into(), "bb".into(), "ccc".into()],
         };
-        let blob = seal(&n, Some("nested-key")).unwrap();
-        let back: Nested = open(&blob, Some("nested-key")).unwrap();
+        let blob = seal(&n, Some("nested-key".to_string())).unwrap();
+        let back: Nested = open(&blob, Some("nested-key".to_string())).unwrap();
         assert_eq!(n, back);
     }
 
     #[test]
     fn wrong_key_fails() {
         let p = Point { x: 1.0, y: 2.0, label: "x".into() };
-        let blob = seal(&p, Some("correct")).unwrap();
+        let blob = seal(&p, Some("correct".to_string())).unwrap();
         // Opening with wrong key should either error or produce garbage that
         // fails to decode as Point.
-        let result: Result<Point, _> = open(&blob, Some("wrong"));
+        let result: Result<Point, _> = open(&blob, Some("wrong".to_string()));
         assert!(result.is_err());
     }
 
@@ -446,8 +447,8 @@ mod tests {
     #[test]
     fn same_plaintext_same_key_produces_same_ciphertext() {
         let p = Point { x: 1.0, y: 2.0, label: "det".into() };
-        let b1 = seal(&p, Some("k")).unwrap();
-        let b2 = seal(&p, Some("k")).unwrap();
+        let b1 = seal(&p, Some("k".to_string())).unwrap();
+        let b2 = seal(&p, Some("k".to_string())).unwrap();
         assert_eq!(b1, b2); // cipher is deterministic
     }
 }

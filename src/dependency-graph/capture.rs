@@ -1,16 +1,16 @@
-//! Runtime reader for the `ironprint.json` fingerprint embedded in the binary.
+//! Runtime reader for the `fingerprint.json` embedded in the binary.
 //!
 //! The companion `build` module (feature `dependency-graph-build`) writes
-//! `ironprint.json` to `$OUT_DIR` at compile time. The downstream binary
+//! `fingerprint.json` to `$OUT_DIR` at compile time. The downstream binary
 //! embeds it with:
 //!
 //! ```rust,ignore
-//! const IRONPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/ironprint.json"));
+//! const BUILD_TIME_FINGERPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
 //! ```
 //!
 //! ## Functions
 //!
-//! * [`parse`] — deserialises the embedded JSON into a typed [`IronprintData`]
+//! * [`parse`] — deserialises the embedded JSON into a typed [`BuildTimeFingerprintData`]
 //!   struct. Returns [`CaptureError`] if the JSON is malformed or a required
 //!   section is absent.
 //! * [`as_bytes`] — returns the raw JSON bytes. Because the JSON is normalised
@@ -31,7 +31,7 @@ use serde_json::Value;
 
 // ─── error ────────────────────────────────────────────────────────────────────
 
-/// Errors that can occur while reading a captured ironprint.
+/// Errors that can occur while reading a captured fingerprint.
 #[derive(Debug)]
 pub enum CaptureError {
     /// The embedded JSON is not valid.
@@ -43,8 +43,8 @@ pub enum CaptureError {
 impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidJson(e)      => write!(f, "ironprint JSON is invalid: {e}"),
-            Self::MissingSection(key) => write!(f, "ironprint is missing section: {key}"),
+            Self::InvalidJson(e)      => write!(f, "fingerprint JSON is invalid: {e}"),
+            Self::MissingSection(key) => write!(f, "fingerprint is missing section: {key}"),
         }
     }
 }
@@ -53,12 +53,12 @@ impl std::error::Error for CaptureError {}
 
 // ─── typed data ───────────────────────────────────────────────────────────────
 
-/// Parsed contents of `ironprint.json`.
+/// Parsed contents of `fingerprint.json`.
 ///
 /// All fields map directly onto the sections produced by
-/// [`build::generate_ironprint`](super::build::generate_ironprint).
+/// [`build::generate_fingerprint`](super::build::generate_fingerprint).
 #[derive(Debug, Clone)]
-pub struct IronprintData {
+pub struct BuildTimeFingerprintData {
     /// Package name and version.
     pub package: PackageInfo,
     /// Build-environment snapshot.
@@ -95,11 +95,11 @@ pub struct BuildInfo {
 
 // ─── public API ───────────────────────────────────────────────────────────────
 
-/// Parse the embedded ironprint JSON into a typed [`IronprintData`].
+/// Parse the embedded fingerprint JSON into a typed [`BuildTimeFingerprintData`].
 ///
 /// Pass the `&str` produced by
-/// `include_str!(concat!(env!("OUT_DIR"), "/ironprint.json"))`.
-pub fn parse(json: &str) -> Result<IronprintData, CaptureError> {
+/// `include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"))`.
+pub fn parse(json: &str) -> Result<BuildTimeFingerprintData, CaptureError> {
     let root: Value = serde_json::from_str(json)
         .map_err(|e| CaptureError::InvalidJson(e.to_string()))?;
 
@@ -160,20 +160,36 @@ pub fn parse(json: &str) -> Result<IronprintData, CaptureError> {
         })
         .unwrap_or_default();
 
-    Ok(IronprintData { package, build, cargo_lock_sha256, deps, source })
+    Ok(BuildTimeFingerprintData { package, build, cargo_lock_sha256, deps, source })
 }
 
-/// Return the raw bytes of the ironprint JSON string.
+/// Return the raw bytes of the fingerprint JSON string.
 ///
-/// Because `ironprint.json` is already normalised (sorted keys, no whitespace,
+/// Because `fingerprint.json` is already normalised (sorted keys, no whitespace,
 /// no absolute paths) at build time, the returned bytes are stable and
 /// deterministic across equivalent builds.
 ///
 /// ```rust,ignore
-/// const IRONPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/ironprint.json"));
+/// const BUILD_TIME_FINGERPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
 ///
-/// let bytes: &[u8] = toolkit_zero::dependency_graph::capture::as_bytes(IRONPRINT);
+/// let bytes: &[u8] = toolkit_zero::dependency_graph::capture::as_bytes(BUILD_TIME_FINGERPRINT);
 /// ```
 pub fn as_bytes(json: &str) -> &[u8] {
     json.as_bytes()
 }
+
+// ─── attribute macro ──────────────────────────────────────────────────────────
+
+/// Embed and bind the build-time `fingerprint.json` in one expression.
+///
+/// Apply to an empty `fn` inside a function body; the function name becomes
+/// the `let` binding in the expansion.
+///
+/// ```text
+/// #[dependencies]          // parse mode  → BuildTimeFingerprintData (propagates ?)
+/// #[dependencies(bytes)]   // bytes mode  → &'static [u8]
+/// ```
+///
+/// Requires the `dependency-graph-capture` feature.
+#[cfg(feature = "dependency-graph-capture")]
+pub use toolkit_zero_macros::dependencies;

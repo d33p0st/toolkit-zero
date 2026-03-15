@@ -741,3 +741,24 @@ fn render_page(template: &PageTemplate, key: &str) -> String {
         }
     }
 }
+
+/// Concise attribute macro alternative to calling [`__location__`] /
+/// [`__location_async__`] directly.
+///
+/// The function **name** becomes the binding; the [`PageTemplate`] is built
+/// from the macro arguments. See the
+/// [crate-level documentation](toolkit_zero::location) and
+/// [`toolkit_zero_macros::browser`] for the full argument reference.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use toolkit_zero::location::browser::{browser, LocationData, LocationError};
+///
+/// async fn run() -> Result<LocationData, LocationError> {
+///     #[browser(title = "My App", tickbox, consent = "I agree")]
+///     fn loc() {}
+///     Ok(loc)
+/// }
+/// ```
+pub use toolkit_zero_macros::browser;
