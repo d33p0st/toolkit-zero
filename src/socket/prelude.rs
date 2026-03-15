@@ -21,7 +21,7 @@
 //!
 //! Re-exports are gated by feature flags:
 //! - `socket-server` / `socket`: [`Server`], [`ServerMechanism`], [`Status`], [`mechanism`]
-//! - `socket-client` / `socket`: [`Client`], [`ClientError`], [`Target`]
+//! - `socket-client` / `socket`: [`Client`], [`ClientError`], [`Target`], [`request`]
 //! - always available: [`SerializationKey`]
 
 pub use crate::socket::SerializationKey;
@@ -30,4 +30,4 @@ pub use crate::socket::SerializationKey;
 pub use crate::socket::server::{Server, ServerMechanism, Status, mechanism};
 
 #[cfg(any(feature = "socket", feature = "socket-client"))]
-pub use crate::socket::client::{Client, ClientError, Target};
+pub use crate::socket::client::{Client, ClientError, Target, request};

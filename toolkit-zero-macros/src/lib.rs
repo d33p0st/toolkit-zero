@@ -1,8 +1,10 @@
 //! Procedural macros for `toolkit-zero`.
 //!
 //! This crate is an internal implementation detail of `toolkit-zero`.
-//! Use the re-exported [`mechanism`] attribute through
-//! `toolkit_zero::socket::server`.
+//! Do not depend on it directly. Use the re-exported attribute macros:
+//!
+//! - [`mechanism`] — server-side route declaration, via `toolkit_zero::socket::server`
+//! - [`request`]   — client-side request shorthand, via `toolkit_zero::socket::client`
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -508,6 +510,261 @@ pub fn mechanism(attr: TokenStream, item: TokenStream) -> TokenStream {
     // ── Final expansion: server.mechanism(<route_expr>); ──────────────────
     quote! {
         #server.mechanism(#route_expr);
+    }
+    .into()
+}
+
+// ─── Client-side: #[request] ─────────────────────────────────────────────────
+
+/// Body/query attachment mode for a client request.
+enum RequestBodyMode {
+    None,
+    Json(Expr),
+    Query(Expr),
+    Encrypted(Expr, Expr),
+    EncryptedQuery(Expr, Expr),
+}
+
+/// Whether to call `.send().await?` or `.send_sync()?`.
+enum SendMode {
+    Async,
+    Sync,
+}
+
+/// Fully parsed `#[request]` attribute arguments.
+struct RequestArgs {
+    client: Ident,
+    method: Ident,
+    path:   LitStr,
+    mode:   RequestBodyMode,
+    send:   SendMode,
+}
+
+/// Parse the mandatory final `, async` or `, sync` keyword.
+fn parse_send_mode(input: ParseStream) -> syn::Result<SendMode> {
+    input.parse::<Token![,]>()?;
+    if input.peek(Token![async]) {
+        input.parse::<Token![async]>()?;
+        Ok(SendMode::Async)
+    } else {
+        let kw: Ident = input.parse()?;
+        match kw.to_string().as_str() {
+            "sync" => Ok(SendMode::Sync),
+            _ => Err(syn::Error::new(
+                kw.span(),
+                "#[request]: expected `async` or `sync` as the final argument",
+            )),
+        }
+    }
+}
+
+impl Parse for RequestArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        // ── Positional: client_ident, METHOD, "/path" ─────────────────────
+        let client: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        let method: Ident = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        let path: LitStr = input.parse()?;
+        input.parse::<Token![,]>()?;
+
+        // ── Optional mode keyword + mandatory send mode ───────────────────
+        let (mode, send) = if input.peek(Token![async]) {
+            input.parse::<Token![async]>()?;
+            (RequestBodyMode::None, SendMode::Async)
+        } else {
+            let kw: Ident = input.parse()?;
+            match kw.to_string().as_str() {
+                "sync" => (RequestBodyMode::None, SendMode::Sync),
+                "json" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let expr: Expr = content.parse()?;
+                    let send = parse_send_mode(input)?;
+                    (RequestBodyMode::Json(expr), send)
+                }
+                "query" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let expr: Expr = content.parse()?;
+                    let send = parse_send_mode(input)?;
+                    (RequestBodyMode::Query(expr), send)
+                }
+                "encrypted" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let body: Expr = content.parse()?;
+                    content.parse::<Token![,]>()?;
+                    let key: Expr = content.parse()?;
+                    let send = parse_send_mode(input)?;
+                    (RequestBodyMode::Encrypted(body, key), send)
+                }
+                "encrypted_query" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let params: Expr = content.parse()?;
+                    content.parse::<Token![,]>()?;
+                    let key: Expr = content.parse()?;
+                    let send = parse_send_mode(input)?;
+                    (RequestBodyMode::EncryptedQuery(params, key), send)
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        kw.span(),
+                        format!(
+                            "#[request]: unknown keyword `{other}`. \
+                             Valid modes: json(<expr>), query(<expr>), \
+                             encrypted(<body>, <key>), encrypted_query(<params>, <key>). \
+                             Final argument must be `async` or `sync`."
+                        ),
+                    ));
+                }
+            }
+        };
+
+        Ok(RequestArgs { client, method, path, mode, send })
+    }
+}
+
+/// Concise HTTP client request for `toolkit-zero` socket-client routes.
+///
+/// Replaces a decorated `fn` item with a `let` binding statement that performs
+/// the HTTP request inline.  The function name becomes the binding name; the
+/// return type annotation is used as the response type `R` in `.send::<R>()`.
+/// The function body is discarded entirely.
+///
+/// # Syntax
+///
+/// ```text
+/// #[request(client, METHOD, "/path", async|sync)]
+/// #[request(client, METHOD, "/path", json(<body_expr>), async|sync)]
+/// #[request(client, METHOD, "/path", query(<params_expr>), async|sync)]
+/// #[request(client, METHOD, "/path", encrypted(<body_expr>, <key_expr>), async|sync)]
+/// #[request(client, METHOD, "/path", encrypted_query(<params_expr>, <key_expr>), async|sync)]
+/// ```
+///
+/// # Parameters
+///
+/// | Argument | Meaning |
+/// |---|---|
+/// | `client` | The [`Client`](toolkit_zero::socket::client::Client) variable in the enclosing scope |
+/// | `METHOD` | HTTP method: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS` |
+/// | `"/path"` | Endpoint path string literal |
+/// | `json(expr)` | Serialise `expr` as a JSON body (`Content-Type: application/json`) |
+/// | `query(expr)` | Serialise `expr` as URL query parameters |
+/// | `encrypted(body, key)` | VEIL-seal `body` with a [`SerializationKey`](toolkit_zero::socket::SerializationKey) |
+/// | `encrypted_query(params, key)` | VEIL-seal `params`, send as `?data=<base64url>` |
+/// | `async` | Finalise with `.send::<R>().await?` |
+/// | `sync`  | Finalise with `.send_sync::<R>()?` |
+///
+/// The function **must** carry an explicit return type — it becomes `R` in the turbofish.
+/// The enclosing function must return a `Result<_, E>` where `E` implements the relevant
+/// `From` for `?` to propagate: `reqwest::Error` for plain/json/query, or
+/// `ClientError` for encrypted variants.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use toolkit_zero::socket::client::{Client, Target, request};
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Deserialize, Serialize, Clone)] struct Item   { id: u32, name: String }
+/// #[derive(Serialize)]                     struct NewItem { name: String }
+/// #[derive(Serialize)]                     struct Filter  { page: u32 }
+///
+/// async fn example() -> Result<(), reqwest::Error> {
+///     let client = Client::new_async(Target::Localhost(8080));
+///
+///     // Plain async GET → let items: Vec<Item> = client.get("/items").send::<Vec<Item>>().await?
+///     #[request(client, GET, "/items", async)]
+///     async fn items() -> Vec<Item> {}
+///
+///     // POST with JSON body
+///     #[request(client, POST, "/items", json(NewItem { name: "widget".into() }), async)]
+///     async fn created() -> Item {}
+///
+///     // GET with query params
+///     #[request(client, GET, "/items", query(Filter { page: 2 }), async)]
+///     async fn page() -> Vec<Item> {}
+///
+///     // Sync DELETE
+///     #[request(client, DELETE, "/items/1", sync)]
+///     fn deleted() -> Item {}
+///
+///     Ok(())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn request(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as RequestArgs);
+    let func = parse_macro_input!(item as ItemFn);
+
+    // ── Validate HTTP method ──────────────────────────────────────────────
+    let method_str = args.method.to_string().to_lowercase();
+    let method_ident = Ident::new(&method_str, args.method.span());
+
+    match method_str.as_str() {
+        "get" | "post" | "put" | "delete" | "patch" | "head" | "options" => {}
+        other => {
+            return syn::Error::new(
+                args.method.span(),
+                format!(
+                    "#[request]: `{other}` is not a valid HTTP method. \
+                     Expected GET, POST, PUT, DELETE, PATCH, HEAD, or OPTIONS."
+                ),
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+
+    let client   = &args.client;
+    let path     = &args.path;
+    let var_name = &func.sig.ident;
+
+    // ── Return type — required; used as turbofish argument ────────────────
+    let ret_ty = match &func.sig.output {
+        syn::ReturnType::Type(_, ty) => ty.as_ref(),
+        syn::ReturnType::Default => {
+            return syn::Error::new(
+                func.sig.ident.span(),
+                "#[request]: a return type is required — it specifies the response type `R` \
+                 in `.send::<R>()`. Example: `async fn my_var() -> Vec<MyType> {}`",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    // ── Build the partial builder chain (without the send call) ──────────
+    let chain = match &args.mode {
+        RequestBodyMode::None => quote! {
+            #client.#method_ident(#path)
+        },
+        RequestBodyMode::Json(expr) => quote! {
+            #client.#method_ident(#path).json(#expr)
+        },
+        RequestBodyMode::Query(expr) => quote! {
+            #client.#method_ident(#path).query(#expr)
+        },
+        RequestBodyMode::Encrypted(body_expr, key_expr) => quote! {
+            #client.#method_ident(#path).encryption(#body_expr, #key_expr)
+        },
+        RequestBodyMode::EncryptedQuery(params_expr, key_expr) => quote! {
+            #client.#method_ident(#path).encrypted_query(#params_expr, #key_expr)
+        },
+    };
+
+    // ── Final let-binding statement ───────────────────────────────────────
+    match &args.send {
+        SendMode::Async => quote! {
+            let #var_name: #ret_ty = #chain.send::<#ret_ty>().await?;
+        },
+        SendMode::Sync => quote! {
+            let #var_name: #ret_ty = #chain.send_sync::<#ret_ty>()?;
+        },
     }
     .into()
 }
