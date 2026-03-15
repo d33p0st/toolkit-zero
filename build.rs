@@ -17,6 +17,15 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // The WASM binary is only needed when the location feature is active.
+    // Skip the work entirely for other feature combinations to keep build times low.
+    let location_enabled = std::env::var("CARGO_FEATURE_LOCATION").is_ok()
+        || std::env::var("CARGO_FEATURE_LOCATION_BROWSER").is_ok();
+
+    if !location_enabled {
+        return;
+    }
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let chacha20poly1305_wasm_dir = manifest_dir.join("chacha20poly1305-wasm");
     let out_dir      = PathBuf::from(std::env::var("OUT_DIR").unwrap());
