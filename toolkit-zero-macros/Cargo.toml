@@ -1,6 +1,6 @@
 [package]
 name = "toolkit-zero-macros"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Soumyo Deep Gupta <deep.main.ac@gmail.com>"]

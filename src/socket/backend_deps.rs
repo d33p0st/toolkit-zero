@@ -30,7 +30,16 @@ pub use bytes;
 pub use serde_urlencoded;
 
 #[cfg(feature = "socket-server")]
-pub use warp;
+pub use hyper;
+
+#[cfg(feature = "socket-server")]
+pub use http;
+
+#[cfg(feature = "socket-server")]
+pub use hyper_util;
+
+#[cfg(feature = "socket-server")]
+pub use http_body_util;
 
 // ── socket-client only ───────────────────────────────────────────────────────
 

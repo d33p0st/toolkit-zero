@@ -6,6 +6,7 @@
 //!
 //! ```rust,no_run
 //! use toolkit_zero::socket::prelude::*;
+//! # use toolkit_zero::socket::server::reply;
 //!
 //! // Server types — fluent builder
 //! let mut server = Server::default();
@@ -30,4 +31,4 @@ pub use crate::socket::SerializationKey;
 pub use crate::socket::server::{Server, ServerMechanism, Status, mechanism};
 
 #[cfg(any(feature = "socket", feature = "socket-client"))]
-pub use crate::socket::client::{Client, ClientError, Target, request};
+pub use crate::socket::client::{Client, ClientBuilder, ClientError, Target, request};

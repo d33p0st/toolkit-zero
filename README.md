@@ -23,9 +23,10 @@ A feature-selective Rust utility crate. Declare only the modules your project re
 - [Query parameter routes](#query-parameter-routes)
 - [Shared state](#shared-state)
 - [Combining state with body / query](#combining-state-with-body--query)
-- [VEIL-encrypted routes](#veil-encrypted-routes)
+- [Encrypted routes](#encrypted-routes)
 - [Serving the server](#serving-the-server)
 - [Graceful shutdown](#graceful-shutdown)
+- [Background server](#background-server)
 - [Building responses](#building-responses)
 - [Sync handlers](#sync-handlers)
 - [`#[mechanism]` attribute macro](#mechanism-attribute-macro)
@@ -39,7 +40,7 @@ A feature-selective Rust utility crate. Declare only the modules your project re
 - [Plain requests](#plain-requests)
 - [JSON body requests](#json-body-requests)
 - [Query parameter requests](#query-parameter-requests)
-- [VEIL-encrypted requests](#veil-encrypted-requests)
+- [Encrypted requests](#encrypted-requests)
 - [Sync vs async sends](#sync-vs-async-sends)
 - [`#[request]` attribute macro](#request-attribute-macro)
 
@@ -92,7 +93,7 @@ A feature-selective Rust utility crate. Declare only the modules your project re
 
 | Feature | What it enables | Module exposed |
 |---|---|---|
-| `serialization` | VEIL cipher — seal any struct to opaque bytes and back | `toolkit_zero::serialization` |
+| `serialization` | ChaCha20-Poly1305 authenticated encryption — seal any struct to opaque bytes and back | `toolkit_zero::serialization` |
 | `socket-server` | Typed HTTP server builder (includes `serialization`) | `toolkit_zero::socket::server` |
 | `socket-client` | Typed HTTP client builder (includes `serialization`) | `toolkit_zero::socket::client` |
 | `socket` | Both `socket-server` and `socket-client` | both socket sub-modules |
@@ -110,7 +111,7 @@ A feature-selective Rust utility crate. Declare only the modules your project re
 Add with `cargo add`:
 
 ```sh
-# VEIL cipher only
+# Serialization (ChaCha20-Poly1305) only
 cargo add toolkit-zero --features serialization
 
 # HTTP server only
@@ -144,7 +145,7 @@ cargo add toolkit-zero --features socket-server,backend-deps
 
 Feature: `serialization`
 
-The VEIL cipher transforms any [`bincode`](https://docs.rs/bincode)-encodable value into an opaque, key-dependent byte sequence. The output carries no recognisable structure; every output byte is a function of the complete input and the key. Without the exact key, the transformation cannot be reversed.
+**ChaCha20-Poly1305** authenticated encryption transforms any [`bincode`](https://docs.rs/bincode)-encodable value into an opaque, authenticated byte blob. Without the correct key the ciphertext cannot be decrypted; any bit-level tampering is detected and rejected by the Poly1305 tag.
 
 Keys are moved into `seal`/`open` and wrapped in `Zeroizing<String>` internally, wiping them from memory on drop.
 
@@ -311,7 +312,7 @@ server.mechanism(
 );
 ```
 
-Missing or malformed query parameters cause warp to return `400 Bad Request`
+Missing or malformed query parameters cause the server to return `400 Bad Request`
 before the handler is invoked.
 
 ### Shared state
@@ -373,11 +374,11 @@ server.mechanism(
 );
 ```
 
-### VEIL-encrypted routes
+### Encrypted routes
 
 Call `.encryption::<T>(key)` (body) or `.encrypted_query::<T>(key)` (query) on the mechanism.  Provide a `SerializationKey::Default` (built-in key) or `SerializationKey::Value("your-key")` (custom key).
 
-Before the handler is called, the body or query is VEIL-decrypted using the supplied key.  A wrong key, mismatched secret, or corrupt payload returns `403 Forbidden` without ever reaching the handler.  The `T` the closure receives is always a trusted, fully-decrypted value.
+Before the handler is called, the body or query is decrypted (ChaCha20-Poly1305) using the supplied key.  A wrong key, mismatched secret, or corrupt payload returns `403 Forbidden` without ever reaching the handler.  The `T` the closure receives is always a trusted, fully-decrypted value.
 
 `T` must implement `bincode::Decode<()>`.
 
@@ -402,7 +403,7 @@ server.mechanism(
 );
 ```
 
-For encrypted query parameters, the client sends `?data=<base64url>` where the value is URL-safe base64 of the VEIL-sealed struct bytes.
+For encrypted query parameters, the client sends `?data=<base64url>` where the value is URL-safe base64 of the ChaCha20-Poly1305-sealed struct bytes.
 
 ### Serving the server
 
@@ -441,6 +442,53 @@ let (tx, rx) = oneshot::channel::<()>();
 server.serve_from_listener(listener, async move { rx.await.ok(); }).await;
 ```
 
+### Background server
+
+Call `serve_managed(addr)` instead of `serve(addr)` to get a `BackgroundServer` handle.
+The server starts immediately; the handle lets you inspect and mutate the running instance:
+
+```rust
+use toolkit_zero::socket::server::{Server, ServerMechanism, reply};
+use serde::Serialize;
+
+#[derive(Serialize)] struct Pong   { ok:  bool   }
+#[derive(Serialize)] struct Status { msg: String }
+
+#[tokio::main]
+async fn main() {
+    let mut server = Server::default();
+    server.mechanism(
+        ServerMechanism::get("/ping")
+            .onconnect(|| async { reply!(json => Pong { ok: true }) })
+    );
+
+    let mut bg = server.serve_managed(([127, 0, 0, 1], 8080));
+    println!("Listening on {}", bg.addr());
+
+    // Hot-plug a new route — no restart, no port gap
+    bg.mechanism(
+        ServerMechanism::get("/status")
+            .onconnect(|| async { reply!(json => Status { msg: "ok".into() }) })
+    ).await;
+
+    // Migrate to a different port — in-flight requests finish first
+    bg.rebind(([127, 0, 0, 1], 9090)).await;
+    println!("Rebound to {}", bg.addr());
+
+    bg.stop().await;
+}
+```
+
+| Method | Behaviour |
+|---|---|
+| `bg.addr()` | Returns the current bind address |
+| `bg.mechanism(route).await` | Inserts a route into the live server — **no restart, no port gap** |
+| `bg.rebind(addr).await` | Gracefully drains in-flight requests, then restarts on the new address |
+| `bg.stop().await` | Sends the shutdown signal and awaits the background task |
+
+All routes registered before `serve_managed` and those added via `bg.mechanism` are
+automatically carried over when `rebind` is called.
+
 ### Building responses
 
 Use the `reply!` macro:
@@ -450,8 +498,8 @@ Use the `reply!` macro:
 | `reply!()` | `200 OK` with empty body |
 | `reply!(json => value)` | `200 OK` with JSON-serialised body |
 | `reply!(json => value, status => Status::Created)` | `201 Created` with JSON body |
-| `reply!(message => warp::reply(), status => Status::NoContent)` | custom status on any reply |
-| `reply!(sealed => value)` | `200 OK` with VEIL-sealed body (`application/octet-stream`) |
+| `reply!(message => my_reply_value, status => Status::NoContent)` | custom status on any `Reply` value |
+| `reply!(sealed => value)` | `200 OK` with ChaCha20-Poly1305-sealed body (`application/octet-stream`) |
 | `reply!(sealed => value, key => SerializationKey::Value("k"))` | sealed with explicit key |
 
 `Status` re-exports the most common HTTP status codes as named variants (`Status::Ok`, `Status::Created`, `Status::NoContent`, `Status::BadRequest`, `Status::Forbidden`, `Status::NotFound`, `Status::InternalServerError`).
@@ -478,7 +526,7 @@ unsafe {
 `unsafe` is required because `onconnect_sync` dispatches work to Tokio's blocking thread pool, which carries important caveats:
 
 - The pool limits live OS threads to 512 (default), but the **waiting-task queue is unbounded**. Under sustained traffic, queued tasks can accumulate without bound, risking out-of-memory conditions or severe latency before any task executes.
-- Panics inside the handler are silently converted to a `Rejection`, masking runtime errors.
+- Panics inside the handler are silently converted to a `500 Internal Server Error` response, masking runtime errors.
 - Handlers that hold a lock (e.g. `Arc<Mutex<_>>`) can stall the thread pool indefinitely under contention from concurrent blocking tasks.
 
 `onconnect_sync` is available on every builder variant: plain, `.json`, `.query`, `.state`, and their combinations.  All have identical safety requirements.
@@ -655,9 +703,9 @@ let items: Vec<Item> = client
 
 URL parameter ordering follows struct field declaration order. Nested structs are not supported by `serde_urlencoded`; keep query types flat.
 
-### VEIL-encrypted requests
+### Encrypted requests
 
-Attach a VEIL-sealed body with `.encryption(value, key)`. The body is sealed prior to transmission; the response bytes are unsealed automatically. Both the request (`T`) and response (`R`) use `bincode` encoding: `T` must implement `bincode::Encode` and `R` must implement `bincode::Decode<()>`.
+Attach a ChaCha20-Poly1305-sealed body with `.encryption(value, key)`. The body is sealed prior to transmission; the response bytes are unsealed automatically. Both the request (`T`) and response (`R`) use `bincode` encoding: `T` must implement `bincode::Encode` and `R` must implement `bincode::Decode<()`.
 
 ```rust
 use bincode::{Encode, Decode};
@@ -677,7 +725,7 @@ let resp: Resp = client
     .await?;
 ```
 
-For encrypted query parameters, use `.encrypted_query(value, key)`.  The params are sealed and sent as `?data=<base64url>`.
+For encrypted query parameters, use `.encrypted_query(value, key)`.  The params are sealed (ChaCha20-Poly1305) and sent as `?data=<base64url>`.
 
 ```rust
 let resp: Resp = client
@@ -1015,9 +1063,9 @@ toolkit-zero = { features = ["dependency-graph-build"] }
 
 ```rust
 fn main() {
-    toolkit_zero::dependency_graph::build::generate_fingerprint()
+    // Pass true to also export a pretty-printed copy alongside Cargo.toml.
+    toolkit_zero::dependency_graph::build::generate_fingerprint(cfg!(debug_assertions))
         .expect("fingerprint generation failed");
-    // see "Debug export" below for the optional export() call
 }
 ```
 
@@ -1044,7 +1092,7 @@ fn main() {
     }
 
     // raw bytes of the normalised JSON
-    let raw: &[u8] = capture::as_bytes(BUILD_TIME_FINGERPRINT);
+    let raw: &[u8] = BUILD_TIME_FINGERPRINT.as_bytes();
     println!("{} bytes", raw.len());
 }
 ```
@@ -1066,18 +1114,9 @@ fn main() {
 
 ### Debug export
 
-`export(enabled: bool)` writes a **pretty-printed** `fingerprint.json` alongside the crate's `Cargo.toml` for local inspection. This file is distinct from the compact version written to `$OUT_DIR`; the binary always embeds the `$OUT_DIR` copy.
+`generate_fingerprint(true)` (or the standalone `export(true)`) writes a **pretty-printed** `fingerprint.json` alongside the crate's `Cargo.toml` for local inspection. This file is distinct from the compact version written to `$OUT_DIR`; the binary always embeds the `$OUT_DIR` copy.
 
-Pass `cfg!(debug_assertions)` to suppress the file automatically in release builds:
-
-```rust
-fn main() {
-    toolkit_zero::dependency_graph::build::generate_fingerprint()
-        .expect("fingerprint generation failed");
-    toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
-        .expect("fingerprint export failed");
-}
-```
+Passing `true` to `generate_fingerprint` only runs `cargo metadata` **once**, which is more efficient than calling `generate_fingerprint(false)` + `export(true)` separately.
 
 > **Add `fingerprint.json` to `.gitignore`.**  The exported file contains the full dependency graph, per-file source hashes, target triple, and compiler version. Although the contents are not secret, committing the file adds repository noise and may expose build-environment details beyond what is intended.
 
@@ -1131,7 +1170,7 @@ When combined with any other feature, `backend-deps` appends a `backend_deps` su
 | Module | Path | Re-exports |
 |---|---|---|
 | `serialization` | `toolkit_zero::serialization::backend_deps` | `bincode`, `base64`, `zeroize` |
-| `socket` (server side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `warp` |
+| `socket` (server side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `bytes`, `serde_urlencoded`, `hyper`, `hyper_util`, `http`, `http_body_util` |
 | `socket` (client side) | `toolkit_zero::socket::backend_deps` | `bincode`, `base64`, `serde`, `tokio`, `log`, `reqwest` |
 | `location` | `toolkit_zero::location::backend_deps` | `tokio`, `serde`, `webbrowser`, `rand` |
 | `encryption` (timelock) | `toolkit_zero::encryption::timelock::backend_deps` | `argon2`, `scrypt`, `zeroize`, `chrono`, `rand`; `tokio` (async variants only) |
@@ -1147,8 +1186,8 @@ toolkit-zero = { features = ["socket-server", "backend-deps"] }
 Then in your code:
 
 ```rust
-// Access warp directly through toolkit-zero
-use toolkit_zero::socket::backend_deps::warp;
+// Access hyper directly through toolkit-zero
+use toolkit_zero::socket::backend_deps::hyper;
 
 // Access bincode through serialization
 use toolkit_zero::serialization::backend_deps::bincode;

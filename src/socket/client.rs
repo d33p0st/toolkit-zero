@@ -141,6 +141,7 @@ pub enum Target {
 ///
 /// # Example
 /// ```rust,no_run
+/// # use toolkit_zero::socket::client::{Client, Target};
 /// # use serde::{Deserialize, Serialize};
 /// # #[derive(Deserialize)] struct Item { id: u32, name: String }
 /// # #[derive(Serialize)] struct NewItem { name: String }
@@ -195,6 +196,7 @@ impl Client {
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::{Client, Target};
     /// // Correct — called from synchronous main before any async runtime starts
     /// fn main() {
     ///     let client = Client::new(Target::Localhost(8080));
@@ -306,6 +308,7 @@ impl<'a> RequestBuilder<'a> {
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use serde::{Deserialize, Serialize};
     /// # #[derive(Serialize)] struct NewItem { name: String }
     /// # #[derive(Deserialize)] struct Item { id: u32, name: String }
@@ -328,6 +331,7 @@ impl<'a> RequestBuilder<'a> {
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use serde::{Deserialize, Serialize};
     /// # #[derive(Serialize)] struct SearchParams { q: String, page: u32 }
     /// # #[derive(Deserialize)] struct SearchResult { items: Vec<String> }
@@ -349,6 +353,7 @@ impl<'a> RequestBuilder<'a> {
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use serde::Deserialize;
     /// # #[derive(Deserialize)] struct User { id: u32, name: String }
     /// # async fn example(client: &Client) -> Result<(), reqwest::Error> {
@@ -369,6 +374,7 @@ impl<'a> RequestBuilder<'a> {
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use serde::Deserialize;
     /// # #[derive(Deserialize)] struct User { id: u32, name: String }
     /// # fn example(client: &Client) -> Result<(), reqwest::Error> {
@@ -385,14 +391,16 @@ impl<'a> RequestBuilder<'a> {
         resp.json::<R>()
     }
 
-    /// Attaches a VEIL-sealed body, transitioning to [`EncryptedBodyRequestBuilder`].
+    /// Attaches an authenticated-encrypted body (ChaCha20-Poly1305), transitioning to
+    /// [`EncryptedBodyRequestBuilder`].
     ///
-    /// The body is VEIL-sealed with the given [`SerializationKey`] and sent as
+    /// The body is sealed with the given [`SerializationKey`] and sent as
     /// `application/octet-stream`; the response is opened with the same key.
     /// For plain-JSON routes use `.json(body)` instead.
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use bincode::{Encode, Decode};
     /// # #[derive(Encode)] struct Req { value: i32 }
     /// # #[derive(Decode)] struct Resp { result: i32 }
@@ -411,13 +419,15 @@ impl<'a> RequestBuilder<'a> {
         EncryptedBodyRequestBuilder { client: self.client, method: self.method, endpoint: self.endpoint, body, key }
     }
 
-    /// Attaches VEIL-sealed query parameters, transitioning to [`EncryptedQueryRequestBuilder`].
+    /// Attaches authenticated-encrypted query parameters (ChaCha20-Poly1305), transitioning
+    /// to [`EncryptedQueryRequestBuilder`].
     ///
-    /// The params are VEIL-sealed and sent as `?data=<base64url>`; the response is opened
-    /// with the same key. For plain-JSON query routes use `.query(params)` instead.
+    /// The params are sealed and sent as `?data=<base64url>`; the response is opened
+    /// with the same key. For plain query-string routes use `.query(params)` instead.
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use bincode::{Encode, Decode};
     /// # #[derive(Encode)] struct Filter { page: u32 }
     /// # #[derive(Decode)] struct Page { items: Vec<String> }
@@ -444,6 +454,7 @@ impl<'a> RequestBuilder<'a> {
 ///
 /// # Example
 /// ```rust,no_run
+/// # use toolkit_zero::socket::client::Client;
 /// # use serde::{Deserialize, Serialize};
 /// # #[derive(Serialize)] struct UpdateItem { name: String }
 /// # #[derive(Deserialize)] struct Item { id: u32, name: String }
@@ -475,6 +486,7 @@ impl<'a, T: Serialize> JsonRequestBuilder<'a, T> {
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use serde::{Deserialize, Serialize};
     /// # #[derive(Serialize)] struct Payload { value: i32 }
     /// # #[derive(Deserialize)] struct Ack { received: bool }
@@ -501,6 +513,7 @@ impl<'a, T: Serialize> JsonRequestBuilder<'a, T> {
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use serde::{Deserialize, Serialize};
     /// # #[derive(Serialize)] struct Payload { value: i32 }
     /// # #[derive(Deserialize)] struct Ack { received: bool }
@@ -530,6 +543,7 @@ impl<'a, T: Serialize> JsonRequestBuilder<'a, T> {
 ///
 /// # Example
 /// ```rust,no_run
+/// # use toolkit_zero::socket::client::Client;
 /// # use serde::{Deserialize, Serialize};
 /// # #[derive(Serialize)] struct Filters { status: String, limit: u32 }
 /// # #[derive(Deserialize)] struct Item { id: u32, name: String }
@@ -561,6 +575,7 @@ impl<'a, T: Serialize> QueryRequestBuilder<'a, T> {
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use serde::{Deserialize, Serialize};
     /// # #[derive(Serialize)] struct Params { page: u32 }
     /// # #[derive(Deserialize)] struct Page { items: Vec<String> }
@@ -587,6 +602,7 @@ impl<'a, T: Serialize> QueryRequestBuilder<'a, T> {
     ///
     /// # Example
     /// ```rust,no_run
+    /// # use toolkit_zero::socket::client::Client;
     /// # use serde::{Deserialize, Serialize};
     /// # #[derive(Serialize)] struct Params { page: u32 }
     /// # #[derive(Deserialize)] struct Page { items: Vec<String> }
@@ -613,12 +629,12 @@ impl<'a, T: Serialize> QueryRequestBuilder<'a, T> {
 
 /// Error returned by [`EncryptedBodyRequestBuilder`] and [`EncryptedQueryRequestBuilder`].
 ///
-/// Wraps either a transport-level [`reqwest::Error`] or a VEIL cipher failure.
+/// Wraps either a transport-level [`reqwest::Error`] or a cipher failure.
 #[derive(Debug)]
 pub enum ClientError {
     /// The underlying HTTP transport failed (connection refused, timeout, etc.).
     Transport(reqwest::Error),
-    /// VEIL sealing or opening failed (wrong key, corrupted bytes, etc.).
+    /// Sealing or opening failed (wrong key, corrupted bytes, etc.).
     Serialization(SerializationError),
 }
 
@@ -643,13 +659,13 @@ impl From<SerializationError> for ClientError {
 
 // ─── EncryptedBodyRequestBuilder ─────────────────────────────────────────────
 
-/// A request builder that VEIL-seals the body before sending.
+/// A request builder that seals the body (ChaCha20-Poly1305) before sending.
 ///
 /// Obtained from [`RequestBuilder::encryption`]. Finalise with
 /// [`send`](EncryptedBodyRequestBuilder::send) (async) or
 /// [`send_sync`](EncryptedBodyRequestBuilder::send_sync) (sync).
 ///
-/// The expected response is also VEIL-sealed and is opened transparently.
+/// The expected response is also sealed and is opened transparently.
 pub struct EncryptedBodyRequestBuilder<'a, T> {
     client: &'a Client,
     method: HttpMethod,
@@ -661,10 +677,10 @@ pub struct EncryptedBodyRequestBuilder<'a, T> {
 impl<'a, T: bincode::Encode> EncryptedBodyRequestBuilder<'a, T> {
     /// Sends the request asynchronously.
     ///
-    /// Before the request leaves, the body is VEIL-sealed using the [`SerializationKey`]
+    /// Before the request leaves, the body is sealed using the [`SerializationKey`]
     /// supplied to [`.encryption()`](RequestBuilder::encryption).  The server receives a
     /// raw `application/octet-stream` payload.  When the response arrives, its bytes are
-    /// VEIL-opened with the same key to produce `R`.  If either sealing or opening fails
+    /// opened with the same key to produce `R`.  If either sealing or opening fails
     /// the error is wrapped in [`ClientError::Serialization`].
     pub async fn send<R>(self) -> Result<R, ClientError>
     where
@@ -679,13 +695,13 @@ impl<'a, T: bincode::Encode> EncryptedBodyRequestBuilder<'a, T> {
             .send().await?;
         log::debug!("Response status: {}", resp.status());
         let bytes = resp.bytes().await?;
-        Ok(crate::serialization::open::<R>(&bytes, self.key.veil_key())?)
+        Ok(crate::serialization::open::<R, _>(&bytes, self.key.veil_key())?)
     }
 
     /// Sends the request synchronously.
     ///
-    /// The body is VEIL-sealed with the configured [`SerializationKey`] before the wire
-    /// send.  The response bytes, once received, are VEIL-opened with the same key to
+    /// The body is sealed with the configured [`SerializationKey`] before the wire
+    /// send.  The response bytes, once received, are opened with the same key to
     /// produce `R`.  Any cipher failure is wrapped in [`ClientError::Serialization`].
     pub fn send_sync<R>(self) -> Result<R, ClientError>
     where
@@ -700,19 +716,20 @@ impl<'a, T: bincode::Encode> EncryptedBodyRequestBuilder<'a, T> {
             .send()?;
         log::debug!("Response status: {}", resp.status());
         let bytes = resp.bytes()?;
-        Ok(crate::serialization::open::<R>(&bytes, self.key.veil_key())?)
+        Ok(crate::serialization::open::<R, _>(&bytes, self.key.veil_key())?)
     }
 }
 
 // ─── EncryptedQueryRequestBuilder ────────────────────────────────────────────
 
-/// A request builder that VEIL-seals query params and sends them as `?data=<base64url>`.
+/// A request builder that seals query params (ChaCha20-Poly1305) and sends them as
+/// `?data=<base64url>`.
 ///
 /// Obtained from [`RequestBuilder::encrypted_query`]. Finalise with
 /// [`send`](EncryptedQueryRequestBuilder::send) (async) or
 /// [`send_sync`](EncryptedQueryRequestBuilder::send_sync) (sync).
 ///
-/// The expected response is also VEIL-sealed and is opened transparently.
+/// The expected response is also sealed and is opened transparently.
 pub struct EncryptedQueryRequestBuilder<'a, T> {
     client: &'a Client,
     method: HttpMethod,
@@ -724,9 +741,9 @@ pub struct EncryptedQueryRequestBuilder<'a, T> {
 impl<'a, T: bincode::Encode> EncryptedQueryRequestBuilder<'a, T> {
     /// Sends the request asynchronously.
     ///
-    /// The params are VEIL-sealed with the configured [`SerializationKey`] and
+    /// The params are sealed with the configured [`SerializationKey`] and
     /// base64url-encoded, then appended to the URL as `?data=<base64url>`.  When the
-    /// response arrives, its bytes are VEIL-opened with the same key to produce `R`.
+    /// response arrives, its bytes are opened with the same key to produce `R`.
     /// Any cipher failure is wrapped in [`ClientError::Serialization`].
     pub async fn send<R>(self) -> Result<R, ClientError>
     where
@@ -741,13 +758,13 @@ impl<'a, T: bincode::Encode> EncryptedQueryRequestBuilder<'a, T> {
             .send().await?;
         log::debug!("Response status: {}", resp.status());
         let bytes = resp.bytes().await?;
-        Ok(crate::serialization::open::<R>(&bytes, self.key.veil_key())?)
+        Ok(crate::serialization::open::<R, _>(&bytes, self.key.veil_key())?)
     }
 
     /// Sends the request synchronously.
     ///
-    /// Same behaviour as [`send`](Self::send) — params are VEIL-sealed and base64url-encoded
-    /// as `?data=<value>`, and the sealed response bytes are VEIL-opened to `R` — but the
+    /// Same behaviour as [`send`](Self::send) — params are sealed and base64url-encoded
+    /// as `?data=<value>`, and the sealed response bytes are opened to `R` — but the
     /// network call blocks the current thread.  Any cipher failure is wrapped in
     /// [`ClientError::Serialization`].
     pub fn send_sync<R>(self) -> Result<R, ClientError>
@@ -763,6 +780,111 @@ impl<'a, T: bincode::Encode> EncryptedQueryRequestBuilder<'a, T> {
             .send()?;
         log::debug!("Response status: {}", resp.status());
         let bytes = resp.bytes()?;
-        Ok(crate::serialization::open::<R>(&bytes, self.key.veil_key())?)
+        Ok(crate::serialization::open::<R, _>(&bytes, self.key.veil_key())?)
+    }
+}
+
+// ─── ClientBuilder ────────────────────────────────────────────────────────────
+
+/// Fluent builder for [`Client`] with optional timeout and other configuration.
+///
+/// Use this instead of the bare `Client::new_*` constructors when you need to
+/// configure a request timeout.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::time::Duration;
+/// use toolkit_zero::socket::client::{ClientBuilder, Target};
+///
+/// // Async client with a 10-second timeout
+/// let client = ClientBuilder::new(Target::Localhost(8080))
+///     .timeout(Duration::from_secs(10))
+///     .build_async();
+///
+/// // Sync client with a 30-second timeout
+/// let client = ClientBuilder::new(Target::Remote("https://api.example.com".to_string()))
+///     .timeout(Duration::from_secs(30))
+///     .build_sync();
+/// ```
+pub struct ClientBuilder {
+    target:  Target,
+    timeout: Option<std::time::Duration>,
+}
+
+impl ClientBuilder {
+    /// Create a new builder for the given [`Target`].
+    pub fn new(target: Target) -> Self {
+        Self { target, timeout: None }
+    }
+
+    /// Set a request timeout.
+    ///
+    /// Both the async and blocking reqwest clients will respect this duration.
+    /// Requests that do not complete within the timeout are cancelled and return
+    /// a [`reqwest::Error`] with `is_timeout()` = `true`.
+    pub fn timeout(mut self, duration: std::time::Duration) -> Self {
+        self.timeout = Some(duration);
+        self
+    }
+
+    /// Build an **async-only** [`Client`]. Safe to call from any context,
+    /// including inside `#[tokio::main]`.
+    pub fn build_async(self) -> Client {
+        log::debug!("Building async-only client (timeout={:?})", self.timeout);
+        let mut builder = AsyncClient::builder();
+        if let Some(t) = self.timeout {
+            builder = builder.timeout(t);
+        }
+        Client {
+            target:       self.target,
+            async_client: Some(builder.build().expect("failed to build reqwest async client")),
+            sync_client:  None,
+        }
+    }
+
+    /// Build a **sync-only** [`Client`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an async context (same restriction as
+    /// `reqwest::blocking::Client`). See [`Client::new_sync`] for details.
+    pub fn build_sync(self) -> Client {
+        log::debug!("Building sync-only client (timeout={:?})", self.timeout);
+        let mut builder = BlockingClient::builder();
+        if let Some(t) = self.timeout {
+            builder = builder.timeout(t);
+        }
+        Client {
+            target:       self.target,
+            async_client: None,
+            sync_client:  Some(builder.build().expect("failed to build reqwest blocking client")),
+        }
+    }
+
+    /// Build a client that supports **both** async and blocking sends.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an async context. See [`Client::new`] for details.
+    pub fn build(self) -> Client {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            panic!(
+                "ClientBuilder::build() called inside an async context. \
+                 Use ClientBuilder::build_async() for async-only clients."
+            );
+        }
+        log::debug!("Building dual async+sync client (timeout={:?})", self.timeout);
+        let mut async_builder   = AsyncClient::builder();
+        let mut sync_builder    = BlockingClient::builder();
+        if let Some(t) = self.timeout {
+            async_builder = async_builder.timeout(t);
+            sync_builder  = sync_builder.timeout(t);
+        }
+        Client {
+            target:       self.target,
+            async_client: Some(async_builder.build().expect("failed to build reqwest async client")),
+            sync_client:  Some(sync_builder.build().expect("failed to build reqwest blocking client")),
+        }
     }
 }

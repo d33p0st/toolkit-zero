@@ -52,8 +52,8 @@
 //! | `"/path"` | string literal | Route path |
 //! | `json` | keyword | Deserialise JSON body; fn receives `(body: T)` |
 //! | `query` | keyword | Deserialise URL query params; fn receives `(params: T)` |
-//! | `encrypted(key)` | keyword + expr | VEIL-decrypt body; fn receives `(body: T)` |
-//! | `encrypted_query(key)` | keyword + expr | VEIL-decrypt query; fn receives `(params: T)` |
+//! | `encrypted(key)` | keyword + expr | Decrypt body (ChaCha20-Poly1305); fn receives `(body: T)` |
+//! | `encrypted_query(key)` | keyword + expr | Decrypt query (ChaCha20-Poly1305); fn receives `(params: T)` |
 //! | `state(expr)` | keyword + expr | Clone state into handler; fn first param is `(state: S)` |
 //!
 //! When `state` is combined with a body mode, the function receives two
@@ -125,7 +125,7 @@
 //!         reply!(json => Item { id, name: body.name }, status => Status::Created)
 //!     }
 //!
-//!     // VEIL-encrypted body
+//!     // ChaCha20-Poly1305-encrypted body
 //!     #[mechanism(server, POST, "/secure", encrypted(SerializationKey::Default))]
 //!     async fn secure(body: NewItem) {
 //!         reply!(json => Item { id: 99, name: body.name })
@@ -166,8 +166,8 @@
 //! | `"/path"` | Endpoint path string literal |
 //! | `json(expr)` | Serialise `expr` as a JSON body (`Content-Type: application/json`) |
 //! | `query(expr)` | Serialise `expr` as URL query parameters |
-//! | `encrypted(body, key)` | VEIL-seal `body` with `key` before sending |
-//! | `encrypted_query(params, key)` | VEIL-seal `params`, send as `?data=<base64url>` |
+//! | `encrypted(body, key)` | Seal `body` (ChaCha20-Poly1305) with `key` before sending |
+//! | `encrypted_query(params, key)` | Seal `params` (ChaCha20-Poly1305), send as `?data=<base64url>` |
 //! | `async` | Finalise with `.send::<R>().await?` |
 //! | `sync` | Finalise with `.send_sync::<R>()?` |
 //!
@@ -699,7 +699,7 @@
 //! // Bytes mode:
 //! // const __TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__: &str =
 //! //     include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
-//! // let <binding>: &'static [u8] = capture::as_bytes(__TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__);
+//! // let <binding>: &'static [u8] = __TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__.as_bytes();
 //! ```
 //!
 //! ## Examples
@@ -1054,7 +1054,7 @@ pub fn timelock(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     // expands to:
 ///     // const __TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__: &str =
 ///     //     include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
-///     // let raw: &'static [u8] = capture::as_bytes(__TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__);
+///     // let raw: &'static [u8] = __TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__.as_bytes();
 ///     raw
 /// }
 /// ```

@@ -95,7 +95,7 @@ pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream 
                             #field_ty,
                             ::toolkit_zero::serialization::SerializationError,
                         > {
-                            ::toolkit_zero::serialization::open::<#field_ty>(
+                            ::toolkit_zero::serialization::open::<#field_ty, ::std::string::String>(
                                 bytes,
                                 ::std::option::Option::Some(#key_lit.to_string()),
                             )
@@ -117,8 +117,8 @@ pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream 
         impl #impl_generics_ts #name #ty_generics_ts #where_clause_ts {
             /// Encode and seal this value into an encrypted byte blob.
             ///
-            /// Pass `None` to use the default VEIL key, or `Some(key)` for a
-            /// custom key.  The key is moved in and zeroized on drop.
+            /// Pass `None` to use the default key (`"serialization/deserialization"`),
+            /// or `Some(key)` for a custom key.  The key is moved in and zeroized on drop.
             pub fn seal(
                 &self,
                 key: ::std::option::Option<::std::string::String>,
@@ -140,7 +140,7 @@ pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream 
                 Self,
                 ::toolkit_zero::serialization::SerializationError,
             > {
-                ::toolkit_zero::serialization::open::<Self>(bytes, key)
+                ::toolkit_zero::serialization::open::<Self, ::std::string::String>(bytes, key)
             }
 
             #(#per_field_methods)*
@@ -205,7 +205,7 @@ pub fn expand_serialize(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let key_arg = match &args.key {
         Some(k) => quote! { ::std::option::Option::Some(#k) },
-        None    => quote! { ::std::option::Option::None },
+        None    => quote! { ::std::option::Option::<::std::string::String>::None },
     };
 
     let source = &args.source;
@@ -325,7 +325,7 @@ pub fn expand_deserialize(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let key_arg = match &args.key {
         Some(k) => quote! { ::std::option::Option::Some(#k) },
-        None    => quote! { ::std::option::Option::None },
+        None    => quote! { ::std::option::Option::<::std::string::String>::None },
     };
 
     let bytes_expr = match &args.source {
@@ -335,7 +335,7 @@ pub fn expand_deserialize(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     quote! {
         let #var_name: #ret_ty =
-            ::toolkit_zero::serialization::open::<#ret_ty>(#bytes_expr, #key_arg)?;
+            ::toolkit_zero::serialization::open::<#ret_ty, _>(#bytes_expr, #key_arg)?;
     }
     .into()
 }
