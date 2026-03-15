@@ -1,8 +1,8 @@
 //! # toolkit-zero
 //!
-//! A feature-selective Rust utility toolkit.  Pull in only what you need via Cargo
-//! feature flags — each feature compiles exactly the modules it requires and nothing
-//! more.
+//! A feature-selective Rust utility crate. Declare only the functionality your
+//! project requires via Cargo feature flags; each feature compiles exclusively
+//! the code it depends on, with no extraneous overhead.
 //!
 //! ---
 //!
@@ -14,7 +14,8 @@
 //! 4. [Socket — client](#socket--client)
 //! 5. [Location](#location)
 //! 6. [Encryption — Timelock](#encryption--timelock)
-//! 7. [Backend deps](#backend-deps-1)
+//! 7. [Dependency Graph — IronPrint](#dependency-graph--ironprint)
+//! 8. [Backend deps](#backend-deps-1)
 //!
 //! ---
 //!
@@ -33,6 +34,8 @@
 //! | `enc-timelock-async-keygen-now` | Async variant of `enc-timelock-keygen-now` | [`encryption::timelock::derive_key_now_async`] |
 //! | `enc-timelock-async-keygen-input` | Async variant of `enc-timelock-keygen-input` | [`encryption::timelock::derive_key_at_async`] |
 //! | `encryption` | All four `enc-timelock-*` features | [`encryption::timelock`] |
+//! | `dependency-graph-build` | Attach a normalised dependency-graph snapshot (`ironprint.json`) at build time | [`dependency_graph::build`] |
+//! | `dependency-graph-capture` | Read the embedded `ironprint.json` snapshot at runtime | [`dependency_graph::capture`] |
 //! | `backend-deps` | Re-exports all third-party deps used by each active module | `*::backend_deps` |
 //!
 //! ```toml
@@ -55,6 +58,14 @@
 //! # Full time-lock encryption suite
 //! toolkit-zero = { version = "3", features = ["encryption"] }
 //!
+//! # Attach IronPrint fingerprint in build.rs
+//! # [build-dependencies]
+//! toolkit-zero = { version = "3", features = ["dependency-graph-build"] }
+//!
+//! # Read IronPrint fingerprint at runtime
+//! # [dependencies]
+//! toolkit-zero = { version = "3", features = ["dependency-graph-capture"] }
+//!
 //! # Re-export deps alongside socket-server
 //! toolkit-zero = { version = "3", features = ["socket-server", "backend-deps"] }
 //! ```
@@ -64,12 +75,12 @@
 //! ## Serialization
 //!
 //! The `serialization` feature exposes the **VEIL cipher** — a custom,
-//! key-dependent binary codec that converts any [`bincode`]-encodable value into
-//! an opaque byte sequence and back.
+//! key-dependent binary codec that transforms any [`bincode`]-encodable value
+//! into an opaque byte sequence and back.
 //!
 //! The two entry points are [`serialization::seal`] and [`serialization::open`].
-//! Every output byte depends on the full message and the key; without the exact
-//! key, the output cannot be inverted.
+//! Every output byte is a function of the complete input and the key; without
+//! the exact key, the output cannot be reversed.
 //!
 //! ```rust,ignore
 //! use toolkit_zero::serialization::{seal, open, Encode, Decode};
@@ -91,11 +102,12 @@
 //!
 //! ## Socket — server
 //!
-//! The `socket-server` feature exposes a fluent builder API for declaring typed
-//! HTTP routes and serving them.  Start every route with [`socket::server::ServerMechanism`],
-//! optionally add a JSON body expectation, URL query parameters, or shared state,
-//! then finalise with `.onconnect(async_handler)`.  Register all routes on a
-//! [`socket::server::Server`] and call `.serve(addr).await`.
+//! The `socket-server` feature exposes a fluent, type-safe builder API for
+//! declaring and serving HTTP routes. Begin each route with
+//! [`socket::server::ServerMechanism`], optionally attach a JSON body expectation,
+//! URL query parameters, or shared state, then finalise with `.onconnect(handler)`.
+//! Register routes on a [`socket::server::Server`] and serve them with a single
+//! call to `.serve(addr).await`.
 //!
 //! The [`socket::server::reply!`] macro is the primary way to construct responses.
 //!
@@ -165,10 +177,10 @@
 //! ## Socket — client
 //!
 //! The `socket-client` feature exposes a fluent [`socket::client::Client`] for
-//! issuing typed HTTP requests.  Construct a client from a
-//! [`socket::client::Target`] (a `localhost` port or a remote URL), pick an HTTP
-//! method, optionally attach a body or query, and call `.send().await` (async) or
-//! `.send_sync()` (blocking).
+//! issuing HTTP requests. Construct a client from a
+//! [`socket::client::Target`] (a localhost port or a remote URL), select an HTTP
+//! method, optionally attach a body or query parameters, and call `.send().await`
+//! (async) or `.send_sync()` (blocking).
 //!
 //! ```rust,ignore
 //! use toolkit_zero::socket::client::{Client, Target};
@@ -220,11 +232,11 @@
 //!
 //! ## Location
 //!
-//! The `location` (or `location-native`) feature exposes browser-based geographic
-//! coordinate acquisition.  A temporary local HTTP server is bound on a random
-//! port, the system's default browser is opened to a consent page, and the
-//! standard browser Geolocation API POSTs the coordinates back.  The server shuts
-//! itself down once a result arrives.
+//! The `location` (or `location-native`) feature provides browser-based geographic
+//! coordinate acquisition. A temporary HTTP server is bound on a randomly assigned
+//! local port, the system default browser is directed to a consent page, and the
+//! coordinates are submitted via the standard Web Geolocation API. The server
+//! shuts itself down upon receiving a result.
 //!
 //! Two entry points are available in [`location::browser`]:
 //!
@@ -266,9 +278,9 @@
 //!
 //! > **Argon2id** (pass 1) → **scrypt** (pass 2) → **Argon2id** (pass 3)
 //!
-//! The key is only reproducible when the same time value, precision, format,
-//! and salts are provided.  Pair with an additional secret for a joint
-//! time ✕ passphrase security model.
+//! The key is reproducible only when the same time value, precision, format,
+//! and salts are supplied. An additional passphrase may be incorporated for a
+//! combined time × passphrase security model.
 //!
 //! **Features:**
 //!
@@ -318,14 +330,101 @@
 //!
 //! ---
 //!
+//! ## Dependency Graph — IronPrint
+//!
+//! Two features; one for each side of the boundary.
+//!
+//! **`dependency-graph-build`** (goes in `[build-dependencies]`):
+//! [`dependency_graph::build::generate_ironprint`] runs `cargo metadata`, hashes
+//! `Cargo.lock` and every `.rs` file under `src/`, captures the profile, target
+//! triple, rustc version, and active features, then writes a compact, normalised
+//! JSON document to `$OUT_DIR/ironprint.json`.
+//! [`dependency_graph::build::export`] optionally writes a pretty-printed copy
+//! alongside `Cargo.toml` for local inspection — pass `false` or
+//! `cfg!(debug_assertions)` to suppress it in release builds.
+//!
+//! **`dependency-graph-capture`** (goes in `[dependencies]`):
+//! [`dependency_graph::capture::parse`] deserialises the embedded snapshot into a
+//! typed [`dependency_graph::capture::IronprintData`] struct.
+//! [`dependency_graph::capture::as_bytes`] returns the raw JSON bytes, which are
+//! stable and deterministic across equivalent builds.
+//!
+//! ### Sections captured in `ironprint.json`
+//!
+//! | Section | Contents |
+//! |---|---|
+//! | `package` | crate name + version |
+//! | `build` | profile, opt-level, target triple, rustc version, active feature flags |
+//! | `deps` | full normalised `cargo metadata` graph (sorted, no absolute paths) |
+//! | `cargo_lock_sha256` | SHA-256 of `Cargo.lock` (comment lines stripped) |
+//! | `source` | SHA-256 of every `.rs` file under `src/` |
+//!
+//! ### Setup
+//!
+//! ```toml
+//! [dependencies]
+//! toolkit-zero = { version = "3", features = ["dependency-graph-capture"] }
+//!
+//! [build-dependencies]
+//! toolkit-zero = { version = "3", features = ["dependency-graph-build"] }
+//! ```
+//!
+//! `build.rs`:
+//!
+//! ```rust,ignore
+//! fn main() {
+//!     toolkit_zero::dependency_graph::build::generate_ironprint()
+//!         .expect("ironprint generation failed");
+//!     // optional: pretty-print to crate root for local inspection
+//!     toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
+//!         .expect("ironprint export failed");
+//! }
+//! ```
+//!
+//! `src/main.rs` (or any binary):
+//!
+//! ```rust,ignore
+//! use toolkit_zero::dependency_graph::capture;
+//!
+//! const IRONPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/ironprint.json"));
+//!
+//! fn main() {
+//!     let data = capture::parse(IRONPRINT).expect("failed to parse ironprint");
+//!     println!("{} v{}", data.package.name, data.package.version);
+//!     println!("target : {}", data.build.target);
+//!     println!("lock   : {}", data.cargo_lock_sha256);
+//!
+//!     let raw = capture::as_bytes(IRONPRINT);
+//!     println!("{} bytes", raw.len());
+//! }
+//! ```
+//!
+//! ### Risks and considerations
+//!
+//! * **Not tamper-proof** — the fingerprint is embedded as plain text in the
+//!   binary's read-only data section and is readable by anyone with access to
+//!   the binary. It is informational in nature; it does not constitute a
+//!   security boundary.
+//! * **Export file** — `export(true)` writes `ironprint.json` to the crate root.
+//!   Add it to `.gitignore` to prevent accidental commits.
+//! * **Build-time overhead** — `cargo metadata` runs on every rebuild triggered
+//!   by the `cargo:rerun-if-changed` directives (changes to `src/`, `Cargo.toml`,
+//!   or `Cargo.lock`).
+//! * **Feature scope** — `build.features` captures active features of the crate
+//!   being built, not toolkit-zero's own features.
+//! * **Path stripping** — absolute and machine-specific paths are removed from
+//!   `cargo metadata` output so the fingerprint is stable across machines.
+//! * **Compile-time only** — the snapshot reflects the build environment at
+//!   compile time; it does not change at runtime.
+//!
+//! ---
+//!
 //! ## Backend deps
 //!
-//! The `backend-deps` feature adds a `backend_deps` sub-module to every active
-//! module.  Each `backend_deps` module re-exports with `pub use` every
-//! third-party crate that its parent module uses internally.
-//!
-//! This lets downstream crates access those dependencies without declaring them
-//! separately in their own `Cargo.toml`.
+//! The `backend-deps` feature appends a `backend_deps` sub-module to each active
+//! module. Every such sub-module re-exports via `pub use` all third-party crates
+//! used internally by the parent module, allowing downstream crates to access
+//! those dependencies without separate `Cargo.toml` declarations.
 //!
 //! | Module | Path | Re-exports |
 //! |---|---|---|
@@ -335,9 +434,9 @@
 //! | location | [`location::backend_deps`] | `tokio`, `serde`, `webbrowser`, `rand` |
 //! | encryption (timelock) | [`encryption::timelock::backend_deps`] | `argon2`, `scrypt`, `zeroize`, `chrono`, `rand`; `tokio` (async variants only) |
 //!
-//! `backend-deps` on its own (without any other feature) compiles but exposes
-//! nothing — the re-exports inside each `backend_deps` module are individually
-//! gated on their parent feature.
+//! Enabling `backend-deps` without any other feature compiles successfully but
+//! exposes no symbols; every re-export within `backend_deps` is individually
+//! gated on the corresponding parent feature.
 
 #[cfg(any(feature = "socket", feature = "socket-server", feature = "socket-client"))]
 pub mod socket;
@@ -350,3 +449,7 @@ pub mod serialization;
 
 #[cfg(any(feature = "encryption", feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
 pub mod encryption;
+
+#[cfg(any(feature = "dependency-graph-build", feature = "dependency-graph-capture"))]
+#[path = "dependency-graph/mod.rs"]
+pub mod dependency_graph;

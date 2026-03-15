@@ -1,10 +1,10 @@
 [package]
 name = "toolkit-zero"
-version = "3.2.1"
+version = "3.3.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Soumyo Deep Gupta <deep.main.ac@gmail.com>"]
-description = "A feature-selective Rust utility toolkit — a growing collection of categorized utilities you can opt into via Cargo features, including only what you need."
+description = "A feature-selective Rust utility crate — a modular collection of opt-in utilities spanning encryption, HTTP networking, geolocation, and build-time fingerprinting. Enable only the features your project requires."
 license = "MIT"
 repository = "https://github.com/d33p0st/toolkit-zero.git"
 homepage = "https://d33p0st.github.io/toolkit-zero/"
@@ -30,8 +30,10 @@ chrono  = { version = "0.4", default-features = false, features = ["clock", "std
 log     = { version = "0.4.29", optional = true }
 rand    = { version = "0.9", optional = true }
 reqwest = { version = "0.13.2", optional = true, features = ["blocking", "json", "query"] }
-scrypt  = { version = "0.11", optional = true }
-serde   = { version = "1.0.228", optional = true }
+scrypt      = { version = "0.11", optional = true }
+serde       = { version = "1.0.228", optional = true }
+serde_json  = { version = "1", optional = true }
+sha2        = { version = "0.10", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
 tokio   = { version = "1.50.0", features = ["rt", "sync", "net"], optional = true }
 warp    = { version = "0.4.2", optional = true }
@@ -75,6 +77,8 @@ enc-timelock-keygen-now = ["dep:argon2", "dep:scrypt", "dep:zeroize", "dep:chron
 enc-timelock-keygen-input = ["dep:argon2", "dep:scrypt", "dep:zeroize", "dep:chrono", "dep:rand"]
 enc-timelock-async-keygen-now = ["enc-timelock-keygen-now", "dep:tokio", "tokio/rt"]
 enc-timelock-async-keygen-input = ["enc-timelock-keygen-input", "dep:tokio", "tokio/rt"]
+dependency-graph-build = ["dep:serde_json", "dep:sha2"]
+dependency-graph-capture = ["dep:serde_json"]
 backend-deps = []
 
 [[example]]

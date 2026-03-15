@@ -1,10 +1,11 @@
 # toolkit-zero
 
-A feature-selective Rust utility toolkit. Pull in only the modules you need via Cargo feature flags — each feature compiles exactly what it requires and nothing more.
+A feature-selective Rust utility crate. Declare only the modules your project requires via Cargo feature flags; each feature compiles exclusively the code it depends on, with no extraneous overhead.
 
 ---
 
-## Table of Contents
+<details>
+<summary>Table of Contents</summary>
 
 1. [Overview](#overview)
 2. [Feature flags](#feature-flags)
@@ -37,12 +38,20 @@ A feature-selective Rust utility toolkit. Pull in only the modules you need via 
    - [Features](#timelock-features)
    - [KDF presets](#kdf-presets)
    - [Usage](#timelock-usage)
+8. [Dependency Graph — IronPrint](#dependency-graph--ironprint)
+   - [Sections captured](#sections-captured)
+   - [Setup](#setup)
+   - [Usage](#ironprint-usage)
+   - [Debug export](#debug-export)
+   - [Risks and considerations](#risks-and-considerations)
+
+</details>
 
 ---
 
 ## Overview
 
-`toolkit-zero` is designed to be zero-waste: you declare only the features you want and cargo compiles only what those features require.  There is no "kitchen sink" import.
+`toolkit-zero` follows a strict zero-overhead model: only the features you declare are compiled into your binary. Every module is isolated behind an independent feature gate; enabling a feature introduces exactly the dependencies that module requires — nothing more.
 
 ---
 
@@ -61,6 +70,8 @@ A feature-selective Rust utility toolkit. Pull in only the modules you need via 
 | `enc-timelock-async-keygen-now` | Async variant of `enc-timelock-keygen-now` | `toolkit_zero::encryption::timelock` |
 | `enc-timelock-async-keygen-input` | Async variant of `enc-timelock-keygen-input` | `toolkit_zero::encryption::timelock` |
 | `encryption` | All four `enc-timelock-*` features | `toolkit_zero::encryption::timelock` |
+| `dependency-graph-build` | Attach a normalised dependency-graph snapshot at build time | `toolkit_zero::dependency_graph::build` |
+| `dependency-graph-capture` | Read the embedded snapshot at runtime | `toolkit_zero::dependency_graph::capture` |
 | `backend-deps` | Re-exports all third-party deps used by each active module | `*::backend_deps` |
 
 Add to `Cargo.toml`:
@@ -68,25 +79,33 @@ Add to `Cargo.toml`:
 ```toml
 [dependencies]
 # VEIL cipher only
-toolkit-zero = { version = "3.2", features = ["serialization"] }
+toolkit-zero = { version = "3.3", features = ["serialization"] }
 
 # HTTP server only
-toolkit-zero = { version = "3.2", features = ["socket-server"] }
+toolkit-zero = { version = "3.3", features = ["socket-server"] }
 
 # HTTP client only
-toolkit-zero = { version = "3.2", features = ["socket-client"] }
+toolkit-zero = { version = "3.3", features = ["socket-client"] }
 
 # Both sides
-toolkit-zero = { version = "3.2", features = ["socket"] }
+toolkit-zero = { version = "3.3", features = ["socket"] }
 
 # Geolocation (pulls in socket-server automatically)
-toolkit-zero = { version = "3.2", features = ["location"] }
+toolkit-zero = { version = "3.3", features = ["location"] }
 
 # Full time-lock encryption suite
-toolkit-zero = { version = "3.2", features = ["encryption"] }
+toolkit-zero = { version = "3.3", features = ["encryption"] }
+
+# Attach IronPrint fingerprint in build.rs
+# [build-dependencies]
+toolkit-zero = { version = "3.3", features = ["dependency-graph-build"] }
+
+# Read IronPrint fingerprint at runtime
+# [dependencies]
+toolkit-zero = { version = "3.3", features = ["dependency-graph-capture"] }
 
 # Re-export deps alongside socket-server
-toolkit-zero = { version = "3.2", features = ["socket-server", "backend-deps"] }
+toolkit-zero = { version = "3.3", features = ["socket-server", "backend-deps"] }
 ```
 
 ---
@@ -95,7 +114,7 @@ toolkit-zero = { version = "3.2", features = ["socket-server", "backend-deps"] }
 
 Feature: `serialization`
 
-The VEIL cipher converts any [`bincode`](https://docs.rs/bincode)-encodable struct into an opaque, key-dependent byte blob.  The output has no recognisable structure and every output byte depends on the full input and the key.  Without the exact key the bytes cannot be inverted.
+The VEIL cipher transforms any [`bincode`](https://docs.rs/bincode)-encodable value into an opaque, key-dependent byte sequence. The output carries no recognisable structure; every output byte is a function of the complete input and the key. Without the exact key, the transformation cannot be reversed.
 
 **Entry points:**
 
@@ -106,7 +125,7 @@ The VEIL cipher converts any [`bincode`](https://docs.rs/bincode)-encodable stru
 
 `key` is `Option<&str>`.  Pass `None` to use the built-in default key.
 
-**Your types must derive `Encode` and `Decode`:**
+**Types must derive `Encode` and `Decode`:**
 
 ```rust
 use toolkit_zero::serialization::{seal, open, Encode, Decode};
@@ -135,7 +154,7 @@ assert_eq!(cfg, back2);
 
 Feature: `socket-server`
 
-A fluent builder API for declaring typed HTTP routes and serving them.  Every route starts from `ServerMechanism`, is enriched with optional body / query / state expectations, and is finalised with `.onconnect(async_handler)`.  Finalised routes are registered on a `Server`, which is then served with a single `.await`.
+A fluent, type-safe builder API for declaring and serving HTTP routes. Each route originates from a `ServerMechanism`, is optionally enriched with JSON body, query parameter, or shared-state expectations, and is finalised via `.onconnect(handler)`. Registered routes are served through a single `.await` call on the `Server`.
 
 ### Plain routes
 
@@ -151,11 +170,11 @@ server.mechanism(
 );
 ```
 
-All seven HTTP methods are available: `get`, `post`, `put`, `delete`, `patch`, `head`, `options`.
+All standard HTTP methods are available: `get`, `post`, `put`, `delete`, `patch`, `head`, and `options`.
 
 ### JSON body routes
 
-Call `.json::<T>()` on the mechanism.  The JSON body is deserialised before the handler runs; the handler receives a ready-to-use `T`.  `T` must implement `serde::Deserialize`.  A missing or malformed body returns `400 Bad Request` automatically.
+Call `.json::<T>()` on the mechanism. The request body is deserialised as `T` before the handler is invoked; the handler always receives a validated, typed value. `T` must implement `serde::Deserialize`. A missing or malformed body automatically yields a `400 Bad Request` response.
 
 ```rust
 use serde::Deserialize;
@@ -180,9 +199,7 @@ server.mechanism(
 
 ### Query parameter routes
 
-Call `.query::<T>()` on the mechanism.  When a request arrives, warp deserialises
-the URL query string into `T` before calling the handler — the handler receives a
-ready-to-use value.  `T` must implement `serde::Deserialize`.
+Call `.query::<T>()` on the mechanism. Incoming query parameters are deserialised as `T` before the handler is invoked; the handler always receives a validated, typed value. `T` must implement `serde::Deserialize`.
 
 **URL shape the server expects:**
 
@@ -221,7 +238,7 @@ before the handler is invoked.
 
 ### Shared state
 
-Call `.state(value)` on the mechanism.  A fresh clone of the state is injected into every request.  The state must be `Clone + Send + Sync + 'static`.  Wrap mutable state in `Arc<Mutex<_>>` or `Arc<RwLock<_>>`.
+Call `.state(value)` on the mechanism. A cloned instance of the state is provided to each request handler. The state type must satisfy `Clone + Send + Sync + 'static`. Wrap mutable shared state in `Arc<Mutex<_>>` or `Arc<RwLock<_>>`.
 
 ```rust
 use std::sync::{Arc, Mutex};
@@ -246,7 +263,7 @@ server.mechanism(
 
 ### Combining state with body / query
 
-State and a body (or query) can be combined.  The order of `.state()` and `.json()` / `.query()` does not matter.  The handler receives `(state: S, body_or_query: T)`.
+State may be combined with a body or query expectation. The call order of `.state()` and `.json()` / `.query()` is not significant; the handler always receives `(state: S, body_or_query: T)`.
 
 ```rust
 use std::sync::{Arc, Mutex};
@@ -363,7 +380,7 @@ Use the `reply!` macro:
 
 ### Sync handlers
 
-Every route finaliser (`onconnect`) has an `unsafe` blocking counterpart — `onconnect_sync` — for cases where an existing blocking API cannot easily be made async.  **Not recommended for production traffic.**
+Every route finaliser (`onconnect`) provides an `unsafe` blocking counterpart, `onconnect_sync`, for cases where an existing synchronous API cannot readily be made asynchronous. **This variant is not recommended for production traffic.**
 
 ```rust
 use toolkit_zero::socket::server::{Server, ServerMechanism, reply};
@@ -380,11 +397,11 @@ unsafe {
 }
 ```
 
-`unsafe` is required because `onconnect_sync` dispatches to Tokio's blocking thread pool, which carries important caveats:
+`unsafe` is required because `onconnect_sync` dispatches work to Tokio's blocking thread pool, which carries important caveats:
 
-- The pool caps live OS threads at 512 (default), but the **waiting-task queue is unbounded**.  Under a traffic surge, tasks accumulate without limit, leading to OOM or severe latency before any queued task executes.
-- Any panic inside the handler is silently converted to a `Rejection`, masking runtime errors.
-- When the handler holds a lock (e.g. `Arc<Mutex<_>>`), lock contention across concurrent blocking tasks can stall the thread pool indefinitely.
+- The pool limits live OS threads to 512 (default), but the **waiting-task queue is unbounded**. Under sustained traffic, queued tasks can accumulate without bound, risking out-of-memory conditions or severe latency before any task executes.
+- Panics inside the handler are silently converted to a `Rejection`, masking runtime errors.
+- Handlers that hold a lock (e.g. `Arc<Mutex<_>>`) can stall the thread pool indefinitely under contention from concurrent blocking tasks.
 
 `onconnect_sync` is available on every builder variant: plain, `.json`, `.query`, `.state`, and their combinations.  All have identical safety requirements.
 
@@ -394,7 +411,7 @@ unsafe {
 
 Feature: `socket-client`
 
-A fluent builder API for issuing typed HTTP requests.  Construct a `Client` from a `Target`, pick an HTTP method, optionally attach a body or query parameters, and call `.send().await` or `.send_sync()`.
+A fluent, type-safe builder API for issuing HTTP requests. Construct a `Client` from a `Target`, select an HTTP method, optionally attach a body or query parameters, and call `.send().await` (async) or `.send_sync()` (blocking).
 
 ### Creating a client
 
@@ -427,11 +444,10 @@ let client = Client::new_async(Target::Remote("https://api.example.com".into()))
 > panics **at construction time** with an actionable message before any field is initialised.
 > `Client::new_sync()` fails the same way through `reqwest` during construction.
 >
-> **Rule of thumb:**
-> - Async program (`#[tokio::main]`) → use `Client::new_async()`.
-> - Sync program with no runtime → use `Client::new_sync()` or `Client::new()`.
-> - Mixed program (sync `main`, manual `tokio::Runtime`) → build the `Client` *before* starting
->   the runtime.
+> **Guidance:**
+> - Async programs (`#[tokio::main]`) — use `Client::new_async()`.
+> - Synchronous programs with no runtime — use `Client::new_sync()` or `Client::new()`.
+> - Programs combining a synchronous entry point with a manual `tokio::Runtime` — construct the `Client` before starting the runtime.
 
 ### Plain requests
 
@@ -448,11 +464,11 @@ let item: Item = client.get("/items/1").send().await?;
 let item: Item = client.get("/items/1").send_sync()?;
 ```
 
-All seven HTTP methods are available: `get`, `post`, `put`, `delete`, `patch`, `head`, `options`.
+All standard HTTP methods are available: `get`, `post`, `put`, `delete`, `patch`, `head`, and `options`.
 
 ### JSON body requests
 
-Attach a body with `.json(value)`.  `value` must implement `serde::Serialize`.  The response is deserialised as `R: serde::Deserialize`.
+Attach a request body with `.json(value)`. `value` must implement `serde::Serialize`; the response is deserialised as `R: serde::Deserialize`.
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -472,8 +488,8 @@ let created: Item = client
 
 ### Query parameter requests
 
-Attach query parameters with `.query(value)`.  `value` must implement
-`serde::Serialize`.  The fields are serialised by `serde_urlencoded` and
+Attach query parameters with `.query(value)`. `value` must implement
+`serde::Serialize`; the fields are serialised by `serde_urlencoded` and
 appended to the request URL as `?key=value&...`.
 
 **URL the client will send:**
@@ -502,12 +518,11 @@ let items: Vec<Item> = client
     .await?;
 ```
 
-Field order in the URL is determined by struct field declaration order.  Keep
-query structs flat — nested structs are not supported by `serde_urlencoded`.
+URL parameter ordering follows struct field declaration order. Nested structs are not supported by `serde_urlencoded`; keep query types flat.
 
 ### VEIL-encrypted requests
 
-Attach a VEIL-sealed body with `.encryption(value, key)`.  The body is sealed before the wire send and the response bytes are opened automatically.  Both `value` (request) and `R` (response) use `bincode` — `value: T` must implement `bincode::Encode`, `R` must implement `bincode::Decode<()>`.
+Attach a VEIL-sealed body with `.encryption(value, key)`. The body is sealed prior to transmission; the response bytes are unsealed automatically. Both the request (`T`) and response (`R`) use `bincode` encoding: `T` must implement `bincode::Encode` and `R` must implement `bincode::Decode<()>`.
 
 ```rust
 use bincode::{Encode, Decode};
@@ -559,13 +574,13 @@ These call-site panics are distinct from the **construction-time** panic that `C
 
 Feature: `location` (or `location-native`)
 
-Acquires the device's geographic coordinates by opening the system's default browser to a locally served consent page.  The browser prompts the user for location permission via the standard Web Geolocation API.  On success, the coordinates are POSTed back to the local server, which shuts itself down and returns the result to the caller.
+Acquires the device's geographic coordinates by opening a locally served consent page in the system default browser. The browser requests location permission through the standard Web Geolocation API; on approval, the coordinates are submitted to the local HTTP server. The server shuts itself down once a result is received and returns the data to the caller.
 
-No external service is contacted.  Everything happens on `127.0.0.1`.
+No external services are contacted. All network activity is confined to `127.0.0.1`.
 
 ### Blocking usage
 
-Works from synchronous `main` **and** from inside an async Tokio runtime.  When called inside an existing runtime, an OS thread is spawned to avoid nesting runtimes.
+Compatible with both synchronous entry points and active Tokio runtimes. When invoked within an existing runtime, an OS thread is spawned to avoid nesting runtimes.
 
 ```rust
 use toolkit_zero::location::browser::{__location__, PageTemplate, LocationError};
@@ -583,7 +598,7 @@ match __location__(PageTemplate::default()) {
 
 ### Async usage
 
-Preferred when already inside a Tokio async context — avoids the extra OS thread spawn.
+Recommended when executing within an active Tokio runtime — eliminates the OS thread spawn required by the blocking variant.
 
 ```rust
 use toolkit_zero::location::browser::{__location_async__, PageTemplate};
@@ -660,7 +675,7 @@ let _data = __location__(PageTemplate::Custom(html.into()));
 
 Feature: `encryption` (or any `enc-timelock-*` sub-feature)
 
-Derives a 32-byte time-locked key through a three-pass RAM-hard KDF chain:
+Derives a deterministic 32-byte time-locked key through a three-pass, memory-hard KDF chain:
 
 > **Argon2id** (pass 1) → **scrypt** (pass 2) → **Argon2id** (pass 3)
 
@@ -734,13 +749,122 @@ feature(s).
 
 ---
 
+## Dependency Graph — IronPrint
+
+Features: `dependency-graph-build` · `dependency-graph-capture`
+
+IronPrint attaches a normalised, deterministic snapshot of the build environment to the compiled binary. The snapshot is written to `$OUT_DIR/ironprint.json` at compile time and embedded via `include_str!`; no runtime I/O is required.
+
+The two features are intentionally independent so that each can be declared in the appropriate `Cargo.toml` section.
+
+### Sections captured
+
+| Section | Contents |
+|---|---|
+| `package` | Crate name + version |
+| `build` | Profile, opt-level, target triple, rustc version, active feature flags |
+| `deps` | Full normalised `cargo metadata` graph — sorted, no absolute paths |
+| `cargo_lock_sha256` | SHA-256 of `Cargo.lock` (comment lines stripped) |
+| `source` | SHA-256 of every `.rs` file under `src/` |
+
+### Setup
+
+```toml
+[dependencies]
+toolkit-zero = { version = "3.3", features = ["dependency-graph-capture"] }
+
+[build-dependencies]
+toolkit-zero = { version = "3.3", features = ["dependency-graph-build"] }
+```
+
+`build.rs`:
+
+```rust
+fn main() {
+    toolkit_zero::dependency_graph::build::generate_ironprint()
+        .expect("ironprint generation failed");
+    // see "Debug export" below for the optional export() call
+}
+```
+
+### IronPrint usage
+
+Embed and read the snapshot in your binary:
+
+```rust
+use toolkit_zero::dependency_graph::capture;
+
+const IRONPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/ironprint.json"));
+
+fn main() {
+    let data = capture::parse(IRONPRINT).expect("failed to parse ironprint");
+
+    println!("{} v{}", data.package.name, data.package.version);
+    println!("profile  : {}", data.build.profile);
+    println!("target   : {}", data.build.target);
+    println!("rustc    : {}", data.build.rustc_version);
+    println!("lock sha : {}", data.cargo_lock_sha256);
+
+    for (file, hash) in &data.source {
+        println!("{file} -> {hash}");
+    }
+
+    // raw bytes of the normalised JSON
+    let raw: &[u8] = capture::as_bytes(IRONPRINT);
+    println!("{} bytes", raw.len());
+}
+```
+
+**`IronprintData` fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `package.name` | `String` | Crate name |
+| `package.version` | `String` | Crate version |
+| `build.profile` | `String` | `"debug"` / `"release"` / … |
+| `build.opt_level` | `String` | `"0"` – `"3"` / `"s"` / `"z"` |
+| `build.target` | `String` | Target triple |
+| `build.rustc_version` | `String` | Full `rustc --version` string |
+| `build.features` | `Vec<String>` | Sorted active feature names of the crate being built |
+| `cargo_lock_sha256` | `String` | Hex SHA-256 of `Cargo.lock` |
+| `source` | `BTreeMap<String, String>` | `path → "sha256:<hex>"` per `.rs` file |
+| `deps` | `serde_json::Value` | Full normalised `cargo metadata` graph |
+
+### Debug export
+
+`export(enabled: bool)` writes a **pretty-printed** `ironprint.json` alongside the crate's `Cargo.toml` for local inspection. This file is distinct from the compact version written to `$OUT_DIR`; the binary always embeds the `$OUT_DIR` copy.
+
+Pass `cfg!(debug_assertions)` to suppress the file automatically in release builds:
+
+```rust
+fn main() {
+    toolkit_zero::dependency_graph::build::generate_ironprint()
+        .expect("ironprint generation failed");
+    toolkit_zero::dependency_graph::build::export(cfg!(debug_assertions))
+        .expect("ironprint export failed");
+}
+```
+
+> **Add `ironprint.json` to `.gitignore`.**  The exported file contains the full dependency graph, per-file source hashes, target triple, and compiler version. Although the contents are not secret, committing the file adds repository noise and may expose build-environment details beyond what is intended.
+
+### Risks and considerations
+
+| Concern | Detail |
+|---|---|
+| **Not tamper-proof** | The fingerprint is embedded as plain text in the binary's read-only data section. Anyone with access to the binary can read it. It is informational, not a security boundary. |
+| **Export file exposure** | `export(true)` writes `ironprint.json` to the crate root. Add it to `.gitignore` to prevent accidental commits. |
+| **Build-time overhead** | `cargo metadata` runs on every rebuild. The `cargo:rerun-if-changed` directives restrict this to changes in `src/`, `Cargo.toml`, or `Cargo.lock` — unchanged builds do not re-run. |
+| **Feature capture scope** | `build.features` captures the active features of the crate being built, not toolkit-zero's own features. |
+| **Absolute-path stripping** | `workspace_root`, `manifest_path`, `src_path`, `path`, and other machine-specific fields are removed from `cargo metadata` output. The fingerprint is stable across different machines and checkout locations. |
+| **Compile-time only** | The snapshot reflects the build environment at compile time. It does not update at runtime. |
+
+---
+
 ## Backend deps
 
 Feature: `backend-deps`
 
-When combined with any other feature, `backend-deps` adds a `backend_deps` sub-module to every active module. Each `backend_deps` module re-exports (via `pub use`) every third-party crate that its parent uses internally.
-
-This lets downstream crates access those dependencies without declaring them separately in their own `Cargo.toml`.
+When combined with any other feature, `backend-deps` appends a `backend_deps` sub-module to each active module. Each such sub-module re-exports (via `pub use`) every third-party crate used internally by the parent module, allowing downstream crates to access those dependencies without separate `Cargo.toml` declarations.
 
 | Module | Path | Re-exports |
 |---|---|---|
@@ -750,11 +874,11 @@ This lets downstream crates access those dependencies without declaring them sep
 | `location` | `toolkit_zero::location::backend_deps` | `tokio`, `serde`, `webbrowser`, `rand` |
 | `encryption` (timelock) | `toolkit_zero::encryption::timelock::backend_deps` | `argon2`, `scrypt`, `zeroize`, `chrono`, `rand`; `tokio` (async variants only) |
 
-Each re-export inside `backend_deps` is individually gated on its parent feature, so only the deps that are actually compiled appear.  Enabling `backend-deps` alone (without any other feature) compiles cleanly but exposes nothing.
+Each re-export is individually gated on its parent feature; only the dependencies that are currently compiled appear in `backend_deps`. Enabling `backend-deps` without any other feature compiles successfully but exposes no symbols.
 
 ```toml
 # Example: socket-server + dep re-exports
-toolkit-zero = { version = "3.2", features = ["socket-server", "backend-deps"] }
+toolkit-zero = { version = "3.3", features = ["socket-server", "backend-deps"] }
 ```
 
 Then in your code:
