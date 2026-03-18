@@ -163,6 +163,7 @@
 /// | `Default` | ChaCha20-Poly1305-sealed bytes (`application/octet-stream`) | `bincode::Encode` / `Decode<()>` |
 /// | `Value(key)` | ChaCha20-Poly1305-sealed bytes with a custom key | `bincode::Encode` / `Decode<()>` |
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum SerializationKey {
     /// Use the built-in default key (`"serialization/deserialization"`).
     Default,
@@ -172,12 +173,20 @@ pub enum SerializationKey {
 
 impl SerializationKey {
     #[doc(hidden)]
-    pub fn veil_key(&self) -> Option<String> {
+    pub(crate) fn veil_key(&self) -> Option<String> {
         match self {
             Self::Default => None,
             Self::Value(k) => Some(k.clone()),
         }
     }
+}
+
+impl From<&str> for SerializationKey {
+    fn from(s: &str) -> Self { Self::Value(s.to_owned()) }
+}
+
+impl From<String> for SerializationKey {
+    fn from(s: String) -> Self { Self::Value(s) }
 }
 
 #[cfg(feature = "socket-server")]

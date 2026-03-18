@@ -17,6 +17,47 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Declare custom cfg keys so rustc doesn't emit "unexpected cfg" warnings.
+    println!("cargo::rustc-check-cfg=cfg(has_app_icon)");
+
+    // ── Browser feature: embed the homepage HTML ──────────────────────────────
+    // Copy assets/browser-index.html → $OUT_DIR/browser-index.html so it can
+    // be embedded via include_str!(concat!(env!("OUT_DIR"), "/browser-index.html")).
+    // This mirrors how the WASM binary is handled: dev mode reads from the source
+    // tree; published-crate mode reads from the assets/ directory that ships with
+    // the crate (listed in Cargo.toml's `include` field).
+    let browser_enabled = std::env::var("CARGO_FEATURE_BROWSER").is_ok();
+    if browser_enabled {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let out_dir      = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+        let html_src     = manifest_dir.join("assets/browser-index.html");
+        let html_dst     = out_dir.join("browser-index.html");
+
+        println!("cargo:rerun-if-changed=assets/browser-index.html");
+
+        assert!(
+            html_src.exists(),
+            "assets/browser-index.html not found — this is a packaging error. \
+             Please report it at https://github.com/d33p0st/toolkit-zero/issues"
+        );
+        std::fs::copy(&html_src, &html_dst)
+            .expect("failed to copy assets/browser-index.html to OUT_DIR");
+
+        // ── Application dock icon (optional) ────────────────────────────────
+        // If `assets/app-icon.png` is present, copy it to OUT_DIR and signal
+        // that it can be embedded.  Build without the file is still valid —
+        // the dock will just show the default macOS exec icon.
+        let icon_src = manifest_dir.join("assets/app-icon.png");
+        println!("cargo:rerun-if-changed=assets/app-icon.png");
+        if icon_src.exists() {
+            let icon_dst = out_dir.join("app-icon.png");
+            std::fs::copy(&icon_src, &icon_dst)
+                .expect("failed to copy assets/app-icon.png to OUT_DIR");
+            println!("cargo:rustc-cfg=has_app_icon");
+        }
+    }
+
+    // ── Location feature: compile / copy chacha20poly1305.wasm ───────────────
     // The WASM binary is only needed when the location feature is active.
     // Skip the work entirely for other feature combinations to keep build times low.
     let location_enabled = std::env::var("CARGO_FEATURE_LOCATION").is_ok()

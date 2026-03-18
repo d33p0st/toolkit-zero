@@ -162,6 +162,7 @@ pub struct LocationData {
 
 /// Errors that can be returned by [`__location__`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LocationError {
     /// The user denied the browser's location permission prompt
     /// (`GeolocationPositionError.PERMISSION_DENIED`, code 1).
@@ -408,9 +409,9 @@ async fn capture(template: PageTemplate) -> Result<LocationData, LocationError> 
     // Open the browser before blocking on the server.
     let url = format!("http://127.0.0.1:{port}");
     if webbrowser::open(&url).is_err() {
-        eprintln!("Could not open browser automatically. Navigate to: {url}");
+        log::warn!("Could not open browser automatically. Navigate to: {url}");
     } else {
-        println!("Location capture page opened. If the browser did not appear, navigate to: {url}");
+        log::info!("Location capture page opened. If the browser did not appear, navigate to: {url}");
     }
 
     server

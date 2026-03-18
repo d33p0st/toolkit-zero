@@ -29,10 +29,10 @@
 //! | `socket` | Both `socket-server` and `socket-client` | both |
 //! | `location-browser` | Browser-based geolocation | [`location::browser`] |
 //! | `location` | Alias for `location-browser` | [`location`] |
-//! | `enc-timelock-keygen-now` | Time-lock key derivation from the system clock | [`encryption::timelock::derive_key_now`] |
-//! | `enc-timelock-keygen-input` | Time-lock key derivation from a caller-supplied time | [`encryption::timelock::derive_key_at`] |
-//! | `enc-timelock-async-keygen-now` | Async variant of `enc-timelock-keygen-now` | [`encryption::timelock::derive_key_now_async`] |
-//! | `enc-timelock-async-keygen-input` | Async variant of `enc-timelock-keygen-input` | [`encryption::timelock::derive_key_at_async`] |
+//! | `enc-timelock-keygen-now` | Time-lock key derivation from the system clock | [`encryption::timelock::timelock`] |
+//! | `enc-timelock-keygen-input` | Time-lock key derivation from a caller-supplied time | [`encryption::timelock::timelock`] |
+//! | `enc-timelock-async-keygen-now` | Async variant of `enc-timelock-keygen-now` | [`encryption::timelock::timelock_async`] |
+//! | `enc-timelock-async-keygen-input` | Async variant of `enc-timelock-keygen-input` | [`encryption::timelock::timelock_async`] |
 //! | `encryption` | All four `enc-timelock-*` features | [`encryption::timelock`] |
 //! | `dependency-graph-build` | Attach a normalised dependency-graph snapshot (`fingerprint.json`) at build time | [`dependency_graph::build`] |
 //! | `dependency-graph-capture` | Read the embedded `fingerprint.json` snapshot at runtime | [`dependency_graph::capture`] |
@@ -259,7 +259,8 @@
 //! use toolkit_zero::socket::client::ClientBuilder;
 //! let client = ClientBuilder::new(Target::Localhost(8080))
 //!     .timeout(Duration::from_secs(5))
-//!     .build_async();
+//!     .build_async()
+//!     .unwrap();
 //!
 //! // Plain GET
 //! let items: Vec<Item> = client.get("/items").send().await?;
@@ -279,7 +280,7 @@
 //!     .await?;
 //!
 //! // Synchronous client — must be built outside any async runtime
-//! let sync_client = ClientBuilder::new(Target::Localhost(8080)).build_sync();
+//! let sync_client = ClientBuilder::new(Target::Localhost(8080)).build_sync().unwrap();
 //! let _: Item = sync_client.delete("/items/1").send_sync()?;
 //! # Ok(())
 //! # }
@@ -317,7 +318,8 @@
 //! use std::time::Duration;
 //! let client = ClientBuilder::new(Target::Localhost(8080))
 //!     .timeout(Duration::from_secs(5))
-//!     .build_async();
+//!     .build_async()
+//!     .unwrap();
 //!
 //! // Plain async GET
 //! #[request(client, GET, "/items", async)]
@@ -604,19 +606,29 @@
 //! Enabling `backend-deps` without any other feature compiles successfully but
 //! exposes no symbols; every re-export within `backend_deps` is individually
 //! gated on the corresponding parent feature.
+#![allow(unused)]
 
 #[cfg(any(feature = "socket", feature = "socket-server", feature = "socket-client"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "socket", feature = "socket-server", feature = "socket-client"))))]
 pub mod socket;
 
 #[cfg(any(feature = "location", feature = "location-browser"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "location", feature = "location-browser"))))]
 pub mod location;
 
 #[cfg(feature = "serialization")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serialization")))]
 pub mod serialization;
 
 #[cfg(any(feature = "encryption", feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "encryption", feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))))]
 pub mod encryption;
 
 #[cfg(any(feature = "dependency-graph-build", feature = "dependency-graph-capture"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "dependency-graph-build", feature = "dependency-graph-capture"))))]
 #[path = "dependency-graph/mod.rs"]
 pub mod dependency_graph;
+
+#[cfg(feature = "browser")]
+#[cfg_attr(docsrs, doc(cfg(feature = "browser")))]
+pub mod browser;

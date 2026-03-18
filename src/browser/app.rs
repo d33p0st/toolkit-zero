@@ -1,0 +1,2236 @@
+//! iced application state, update, view and subscription for the browser.
+
+use std::time::{Duration, Instant};
+
+use iced::
+    {Color, Element, Length, Point, Radians, Rectangle, Size, Subscription, Task, Theme,
+    alignment,
+    widget::{
+        Button, Canvas, Column, Container, PickList, ProgressBar, Row, Scrollable, Slider,
+        Space, Stack, Text, TextInput,
+        button, container, progress_bar, text_input,
+    },
+    window,
+};
+use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
+
+use super::{
+    BrowserEvent, Target,
+    history,
+    loader::BorderTrace,
+    quicklinks,
+    tab::{Tab, TabGroup, VerticalTabBar, GROUP_COLORS, PANEL_COLLAPSED_W, PANEL_EXPANDED_W},
+    urlencoding,
+    webview,
+};
+
+// ── reduce the visual height for a thin strip feel
+const ADDR_BAR_H: f32 = 38.0;
+pub const CHROME_H: f32 = ADDR_BAR_H;
+const INSET: f32 = 1.5;
+const LOAD_SPEED: f32 = 0.007;
+const PANEL_SPEED: f32 = 14.0;
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    AddressChanged(String),
+    Navigate,
+    Back,
+    Forward,
+    Reload,
+    NewTab,
+    CloseTab(usize),
+    SelectTab(usize),
+    TabsHovered(bool),
+    ToggleHistory,
+    DeleteAllHistory,
+    DeleteHistoryRange(u64),
+    NavigateHistory(String),
+    /// Async history load result.
+    HistoryLoaded(Vec<history::HistoryEntry>),
+    /// IPC message received from the WebView.
+    IpcReceived(String),
+    WindowOpened(window::Id),
+    WindowResized(window::Id, Size),
+    WebViewReady,
+    PageStarted(String),
+    PageFinished(String),
+    TitleChanged(String),
+    Tick(Instant),
+    // ── tab groups ─────────────────────────────────────────────
+    /// Create a new group containing the current active tab.
+    CreateTabGroup,
+    /// Cycle the tab at `idx` through all groups (right-click).
+    CycleTabGroup(usize),
+    /// Directly assign tab `idx` to `group_id` (None = ungroup).
+    SetTabGroup(usize, Option<u64>),
+    /// Delete a group; its members become ungrouped.
+    DeleteTabGroup(u64),
+    /// Begin inline rename of a group.
+    BeginRenameGroup(u64),
+    GroupRenameChanged(String),
+    CommitGroupRename,
+    /// Cycle through Light → Dark → Auto.
+    CycleTheme,
+    /// Toggle whether visited pages are appended to `history.hist`.
+    ToggleHistoryRecording,
+    /// Toggle the downloads side-panel.
+    ToggleDownloads,
+    /// Notify that a file download has started (url, temp path with .tkz, final path).
+    DownloadStarted(String, std::path::PathBuf, std::path::PathBuf),
+    /// Notify that a file download finished (success/failure).
+    DownloadCompleted(String, bool),
+    /// Clear completed/failed downloads from the list.
+    ClearDoneDownloads,
+    /// History deletion slider value changed.
+    HistorySliderChanged(f32),
+    /// History deletion time-unit (dropdown) changed.
+    HistoryUnitChanged(TimeUnit),
+    /// Delete history entries within the selected range.
+    DeleteHistoryByUnit,
+    /// Cancel an in-progress download and delete its partial `.tkz` file.
+    CancelDownload(u64),
+    /// Open a completed download with the system default application.
+    OpenDownloadedFile(u64),
+    /// Reveal a download in the system file manager.
+    RevealDownload(u64),
+    /// Progress update from the parallel downloader (id, bytes, total).
+    DownloadProgress(u64, u64, Option<u64>),
+    /// Download completed successfully (id); temp file already renamed.
+    DownloadFinished(u64),
+    /// Download failed (id).
+    DownloadFailed(u64),
+}
+
+/// Determines which visual theme the browser uses.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThemeMode {
+    /// Always use a light palette.
+    Light,
+    /// Always use a dark palette.
+    Dark,
+    /// Light 07:00–19:00 local time, dark otherwise.
+    Auto,
+}
+
+/// Time unit for history deletion range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeUnit {
+    Seconds,
+    Minutes,
+    Hours,
+    Days,
+    Months,
+    Years,
+}
+
+impl std::fmt::Display for TimeUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeUnit::Seconds => write!(f, "seconds"),
+            TimeUnit::Minutes => write!(f, "minutes"),
+            TimeUnit::Hours   => write!(f, "hours"),
+            TimeUnit::Days    => write!(f, "days"),
+            TimeUnit::Months  => write!(f, "months"),
+            TimeUnit::Years   => write!(f, "years"),
+        }
+    }
+}
+
+const TIME_UNITS: &[TimeUnit] = &[
+    TimeUnit::Seconds,
+    TimeUnit::Minutes,
+    TimeUnit::Hours,
+    TimeUnit::Days,
+    TimeUnit::Months,
+    TimeUnit::Years,
+];
+
+// ── Download ring canvas widget ───────────────────────────────────────────────
+
+/// Small circular-ring widget rendered in the address bar as the download button.
+///
+/// When downloads are active it shows a spinning blue arc.  
+/// When all downloads are done (but not yet cleared) it shows a solid green ring.  
+/// When idle it shows a thin gray ring with a ↓ glyph in the centre.
+struct DownloadRing {
+    /// Number of downloads currently in progress.
+    active: usize,
+    /// Number of completed-but-not-cleared downloads.
+    done: usize,
+    /// Animation phase (radians) advancing each Tick while downloads are active.
+    phase: f32,
+    dark: bool,
+}
+
+impl canvas::Program<Message> for DownloadRing {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<Geometry<iced::Renderer>> {
+        use std::f32::consts::PI;
+
+        let mut frame = Frame::new(renderer, bounds.size());
+        let sz = bounds.size();
+        let center = Point::new(sz.width / 2.0, sz.height / 2.0);
+        let radius = (sz.width.min(sz.height) / 2.0 - 2.5).max(2.0);
+
+        // ── Background ring ───────────────────────────────────────────────
+        let bg = if self.dark {
+            Color::from_rgba(1.0, 1.0, 1.0, 0.18)
+        } else {
+            Color::from_rgba(0.0, 0.0, 0.0, 0.18)
+        };
+        frame.stroke(
+            &Path::new(|b| b.arc(canvas::path::Arc {
+                center,
+                radius,
+                start_angle: Radians(0.0),
+                end_angle: Radians(2.0 * PI),
+            })),
+            Stroke::default().with_color(bg).with_width(2.0),
+        );
+
+        // ── Foreground arc / ring ─────────────────────────────────────────
+        if self.active > 0 {
+            // Spinning indeterminate arc ≈ 100°
+            let span = PI * 0.56;
+            frame.stroke(
+                &Path::new(|b| b.arc(canvas::path::Arc {
+                    center,
+                    radius,
+                    start_angle: Radians(self.phase),
+                    end_angle:   Radians(self.phase + span),
+                })),
+                Stroke::default()
+                    .with_color(Color::from_rgb(0.15, 0.55, 1.0))
+                    .with_width(2.0),
+            );
+            // Count badge
+            frame.fill_text(canvas::Text {
+                content: format!("{}", self.active),
+                position: Point::new(sz.width / 2.0 - 3.0, sz.height / 2.0 - 6.0),
+                color: Color::from_rgb(0.15, 0.55, 1.0),
+                size: iced::Pixels(10.0),
+                ..canvas::Text::default()
+            });
+        } else if self.done > 0 {
+            // Full green ring — all done
+            frame.stroke(
+                &Path::new(|b| b.arc(canvas::path::Arc {
+                    center,
+                    radius,
+                    start_angle: Radians(-PI / 2.0),
+                    end_angle:   Radians(-PI / 2.0 + 2.0 * PI),
+                })),
+                Stroke::default()
+                    .with_color(Color::from_rgb(0.20, 0.78, 0.40))
+                    .with_width(2.0),
+            );
+            let gc = if self.dark {
+                Color::from_rgb(0.20, 0.78, 0.40)
+            } else {
+                Color::from_rgb(0.10, 0.60, 0.28)
+            };
+            frame.fill_text(canvas::Text {
+                content: "\u{2713}".to_string(), // ✓
+                position: Point::new(sz.width / 2.0 - 4.0, sz.height / 2.0 - 6.0),
+                color: gc,
+                size: iced::Pixels(10.0),
+                ..canvas::Text::default()
+            });
+        } else {
+            // Idle: ↓ glyph
+            let ic = if self.dark {
+                Color::from_rgba(0.60, 0.60, 0.70, 0.80)
+            } else {
+                Color::from_rgba(0.30, 0.30, 0.40, 0.80)
+            };
+            frame.fill_text(canvas::Text {
+                content: "\u{2193}".to_string(), // ↓
+                position: Point::new(sz.width / 2.0 - 3.5, sz.height / 2.0 - 6.0),
+                color: ic,
+                size: iced::Pixels(10.0),
+                ..canvas::Text::default()
+            });
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
+pub struct BrowserState {
+    tabs: Vec<Tab>,
+    active_tab: usize,
+    address_input: String,
+    window_size: Size,
+    window_id: Option<window::Id>,
+    is_loading: bool,
+    load_progress: f32,
+    load_alpha: f32,
+    tabs_hovered: bool,
+    tab_panel_w: f32,
+    pending_target: Option<Target>,
+    /// When `true`, the next `PageFinished` will NOT push to per-tab nav history
+    /// (used for back/forward/reload/tab-switch where we initiate the navigation).
+    suppress_next_push: bool,
+    /// Whether the persistent history side-panel is visible.
+    show_history: bool,
+    /// Cached history entries shown in the panel (refreshed on open).
+    history_entries: Vec<history::HistoryEntry>,
+    /// Pending quicklinks injection into the active homepage tab.
+    needs_quicklinks_inject: bool,
+    /// All tab groups.
+    tab_groups: Vec<TabGroup>,
+    /// Monotonically increasing counter for group IDs.
+    next_group_id: u64,
+    /// Group currently being renamed (shows the rename overlay).
+    renaming_group: Option<u64>,
+    /// Text buffer for the rename input.
+    group_rename_text: String,
+    /// Current theme mode.
+    theme_mode: ThemeMode,
+    /// Whether page visits are recorded in the persistent history file.
+    /// Does not affect the per-tab back/forward stack.
+    history_recording: bool,
+    /// Whether cookies/site-data survive across restarts (macOS only).
+    /// Saved to disk for future UI; takes effect on the *next* app start.
+    session_persistence_enabled: bool,
+    /// Whether the downloads side-panel is open.
+    show_downloads: bool,
+    /// Active and recently completed downloads.
+    downloads: Vec<super::downloads::DownloadEntry>,
+    /// Sequential counter for assigning download IDs.
+    next_download_id: u64,
+    /// Slider value (1–100) for history deletion time range.
+    history_delete_amount: f32,
+    /// Unit for the history deletion slider.
+    history_delete_unit: TimeUnit,
+    /// Phase (radians) driving the animated download button pulse.
+    download_anim_phase: f32,
+    /// Tick counter used to rate-limit file-system polling to ~500 ms intervals.
+    _poll_tick_counter: u32,
+    /// Instant of the previous Tick, used to compute download speed per tick interval.
+    last_tick: std::time::Instant,
+    /// Tracks the last time each URL's download was started, used to debounce
+    /// WKWebView double-fire events (which fire <50 ms apart) while still
+    /// allowing genuine re-clicks of the same link.
+    recent_download_starts: std::collections::HashMap<String, std::time::Instant>,
+    /// When `Target::UrlFromHome` is used, holds the target URL while the
+    /// homepage is loading. Once the homepage's `PageFinished` fires we
+    /// navigate here so the webview back-stack contains the homepage.
+    pending_url_after_home: Option<String>,
+    /// Receiver for programmatic API commands from [`super::api::BrowserHandle`].
+    /// `None` when the browser was launched without an API handle.
+    api_rx: Option<tokio::sync::mpsc::UnboundedReceiver<super::api::ApiMessage>>,
+}
+
+impl BrowserState {
+    pub fn new(target: Target) -> (Self, Task<Message>) {
+        let initial_tab = match &target {
+            Target::Default        => Tab::new_html(super::homepage_html_arc()),
+            Target::Url(u)         => Tab::new(u.clone()),
+            Target::File(p)        => Tab::new(format!("file://{}", p.display())),
+            Target::Html(html)     => Tab::new_html(std::sync::Arc::from(html.as_str())),
+            Target::UrlFromHome(u) => Tab::new(u.clone()),
+        };
+        let address_input = match &target {
+            Target::Default        => String::new(),
+            Target::Url(u)         => u.clone(),
+            Target::File(p)        => format!("file://{}", p.display()),
+            Target::Html(_)        => String::new(),
+            Target::UrlFromHome(u) => u.clone(),
+        };
+        let saved = super::settings::load();
+        let state = BrowserState {
+            tabs: vec![initial_tab],
+            active_tab: 0,
+            address_input,
+            window_size: Size::new(1280.0, 820.0),
+            window_id: None,
+            is_loading: false,
+            load_progress: 0.0,
+            load_alpha: 0.0,
+            tabs_hovered: false,
+            tab_panel_w: PANEL_COLLAPSED_W,
+            pending_target: Some(target),
+            suppress_next_push: false,
+            show_history: false,
+            history_entries: Vec::new(),
+            needs_quicklinks_inject: false,
+            tab_groups: Vec::new(),
+            next_group_id: 0,
+            renaming_group: None,
+            group_rename_text: String::new(),
+            theme_mode: ThemeMode::Auto,
+            history_recording: saved.history_recording,
+            session_persistence_enabled: saved.session_persistence,
+            show_downloads: false,
+            downloads: Vec::new(),
+            next_download_id: 0,
+            history_delete_amount: 24.0,
+            history_delete_unit: TimeUnit::Hours,
+            download_anim_phase: 0.0,
+            _poll_tick_counter: 0,
+            last_tick: std::time::Instant::now(),
+            recent_download_starts: std::collections::HashMap::new(),
+            pending_url_after_home: None,
+            api_rx: super::api::take_receiver(),
+        };
+        (state, Task::none())
+    }
+}
+
+pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
+    match message {
+        Message::AddressChanged(s) => { state.address_input = s; Task::none() }
+        Message::Navigate => {
+            let url = resolve_url(&state.address_input);
+            navigate_current_tab(state, url);
+            // Unfocus the address bar by focusing a nonexistent ID — the
+            // operation traverses every focusable widget and calls unfocus()
+            // on all that don't match, which means all of them.
+            iced::widget::operation::focus::<Message>(iced::widget::Id::unique())
+        }
+        Message::Back => {
+            if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+                if tab.can_go_back() {
+                    tab.nav_pos -= 1;
+                    let url = tab.nav_history[tab.nav_pos].clone();
+                    tab.url = url.clone();
+                    state.suppress_next_push = true;
+                    if url == "tkz:home" {
+                        webview::load_html(tab.home_html.as_deref().unwrap_or(super::HOMEPAGE_HTML));
+                        state.address_input = String::new();
+                        state.needs_quicklinks_inject = true;
+                    } else {
+                        state.address_input = url.clone();
+                        webview::navigate(&url);
+                    }
+                }
+            }
+            iced::widget::operation::focus::<Message>(iced::widget::Id::unique())
+        }
+        Message::Forward => {
+            if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+                if tab.can_go_forward() {
+                    tab.nav_pos += 1;
+                    let url = tab.nav_history[tab.nav_pos].clone();
+                    tab.url = url.clone();
+                    state.suppress_next_push = true;
+                    if url == "tkz:home" {
+                        webview::load_html(tab.home_html.as_deref().unwrap_or(super::HOMEPAGE_HTML));
+                        state.address_input = String::new();
+                        state.needs_quicklinks_inject = true;
+                    } else {
+                        state.address_input = url.clone();
+                        webview::navigate(&url);
+                    }
+                }
+            }
+            iced::widget::operation::focus::<Message>(iced::widget::Id::unique())
+        }
+        Message::Reload  => {
+            state.suppress_next_push = true;
+            let tab = &state.tabs[state.active_tab];
+            if tab.url == "tkz:home" || tab.home_html.is_some() {
+                // WKWebView doesn't persist HTML loaded via load_html, so
+                // direct reload would blank the page. Re-inject the HTML.
+                webview::load_html(tab.home_html.as_deref().unwrap_or(super::HOMEPAGE_HTML));
+                state.needs_quicklinks_inject = true;
+            } else {
+                webview::reload();
+            }
+            Task::none()
+        }
+
+        Message::TabsHovered(h) => { state.tabs_hovered = h; Task::none() }
+
+        Message::NewTab => {
+            state.tabs.push(Tab::new_html(super::homepage_html_arc()));
+            state.active_tab = state.tabs.len() - 1;
+            state.address_input = String::new();
+            state.needs_quicklinks_inject = true;
+            webview::load_html(super::HOMEPAGE_HTML);
+            Task::none()
+        }
+        Message::CloseTab(idx) => {
+            if state.tabs.len() == 1 {
+                return window::close(state.window_id.unwrap());
+            }
+            state.tabs.remove(idx);
+            if state.active_tab >= state.tabs.len() {
+                state.active_tab = state.tabs.len() - 1;
+            }
+            let (home_html, url) = {
+                let tab = &state.tabs[state.active_tab];
+                (tab.home_html.clone(), tab.url.clone())
+            };
+            state.suppress_next_push = true;
+            if let Some(html) = &home_html {
+                webview::load_html(html);
+                state.address_input = String::new();
+                state.needs_quicklinks_inject = true;
+            } else {
+                state.address_input = url.clone();
+                webview::navigate(&url);
+            }
+            cleanup_empty_groups(state);
+            Task::none()
+        }
+        Message::SelectTab(idx) => {
+            state.active_tab = idx;
+            state.suppress_next_push = true;
+            let (home_html, url) = {
+                let tab = &state.tabs[idx];
+                (tab.home_html.clone(), tab.url.clone())
+            };
+            if let Some(html) = &home_html {
+                webview::load_html(html);
+                state.address_input = String::new();
+                state.needs_quicklinks_inject = true;
+            } else {
+                state.address_input = url.clone();
+                webview::navigate(&url);
+            }
+            Task::none()
+        }
+
+        Message::WindowOpened(id) => {
+            state.window_id = Some(id);
+
+            // Restore any downloads that were in-flight when the browser last closed.
+            for entry in super::stash::load_stash() {
+                let dl_id = state.next_download_id;
+                state.next_download_id += 1;
+                let bytes_so_far = std::fs::metadata(&entry.temp_dest)
+                    .ok()
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                state.downloads.push(super::downloads::DownloadEntry {
+                    id: dl_id,
+                    url: entry.url.clone(),
+                    filename: entry.filename.clone(),
+                    temp_dest: entry.temp_dest.clone(),
+                    final_dest: entry.final_dest.clone(),
+                    bytes_downloaded: bytes_so_far,
+                    total_bytes: None,
+                    speed_bps: 0,
+                    status: super::downloads::DownloadStatus::InProgress,
+                });
+                super::downloader::spawn_download(dl_id, entry.url, entry.temp_dest, entry.final_dest);
+            }
+
+            // Set macOS dock icon after NSApp is fully initialised.
+            #[cfg(all(target_os = "macos", has_app_icon))]
+            super::set_dock_icon();
+            window::size(id)
+                .then(move |actual_size| create_webview_task(id, actual_size, None, None))
+                .map(|()| Message::WebViewReady)
+        }
+        Message::WindowResized(_, new_size) => {
+            state.window_size = new_size;
+            let right_w = right_panel_w(state);
+            let (x, y, w, h) = content_bounds(new_size, state.tab_panel_w, right_w);
+            webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            Task::none()
+        }
+        Message::WebViewReady => {
+            state.suppress_next_push = true;
+            if let Some(target) = state.pending_target.take() {
+                match &target {
+                    Target::Default | Target::Html(_) => state.needs_quicklinks_inject = true,
+                    _ => {}
+                }
+                match target {
+                    Target::Default        => webview::load_html(super::HOMEPAGE_HTML),
+                    Target::Url(url)       => webview::navigate(&url),
+                    Target::File(path)     => webview::navigate(&format!("file://{}", path.display())),
+                    Target::Html(html)     => webview::load_html(&html),
+                    Target::UrlFromHome(url) => {
+                        // Load the homepage first to seed the webview back-stack.
+                        // Once the homepage's PageFinished fires we navigate to `url`.
+                        webview::load_html(super::HOMEPAGE_HTML);
+                        state.pending_url_after_home = Some(url);
+                    }
+                }
+            }
+            Task::none()
+        }
+
+        Message::PageStarted(url) => {
+            state.is_loading = true;
+            state.load_progress = 0.0;
+            state.load_alpha = 1.0;
+            if !url.is_empty() && url != "about:blank" {
+                if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+                    tab.url = url.clone();
+                }
+                state.address_input = url;
+            }
+            // Unfocus the address bar when a page starts loading (e.g., link click in webview).
+            iced::widget::operation::focus::<Message>(iced::widget::Id::unique())
+        }
+        Message::PageFinished(url) => {
+            state.load_progress = 1.0;
+            if !url.is_empty() && url != "about:blank" && !url.starts_with("tkz:") {
+                let title = state.tabs.get(state.active_tab)
+                    .map(|t| t.title.clone())
+                    .unwrap_or_default();
+                if state.suppress_next_push {
+                    if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+                        tab.url = url.clone();
+                        tab.home_html = None;
+                    }
+                } else {
+                    if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+                        if tab.nav_history.get(tab.nav_pos) != Some(&url) {
+                            tab.push_nav(url.clone());
+                        }
+                        tab.url = url.clone();
+                        tab.home_html = None;
+                    }
+                    // Append synchronously — history.hist is a small append-only file;
+                    // the write is a single buffered syscall (< 1 ms).
+                    if state.history_recording {
+                        history::append_entry(&title, &url);
+                    }
+                }
+                state.suppress_next_push = false;
+                state.address_input = url;
+            } else {
+                // about:blank or tkz: URL.
+                if let Some(url) = state.pending_url_after_home.take() {
+                    // Homepage finished loading — now navigate to the real target.
+                    // The webview back-stack already has the homepage in it.
+                    navigate_current_tab(state, url);
+                } else if state.tabs.get(state.active_tab)
+                    .map(|t| t.home_html.is_some() || t.url == "tkz:home")
+                    .unwrap_or(false)
+                {
+                    // Normal home tab — inject quicklinks and theme.
+                    inject_quicklinks();
+                    inject_theme(effective_dark(state.theme_mode));
+                }
+                state.suppress_next_push = false;
+            }
+            Task::none()
+        }
+        Message::TitleChanged(title) => {
+            if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+                tab.title = title;
+            }
+            Task::none()
+        }
+
+        Message::ToggleHistory => {
+            state.show_downloads = false;
+            state.show_history = !state.show_history;
+            if state.show_history {
+                state.history_entries = history::load_history();
+            }
+            // Shrink/restore webview so the iced history panel is not obscured
+            // by the native OS webview layer sitting on top of iced.
+            let right_w = right_panel_w(state);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            Task::none()
+        }
+        Message::HistoryLoaded(entries) => {
+            state.history_entries = entries;
+            Task::none()
+        }
+        Message::DeleteAllHistory => {
+            history::delete_all();
+            state.history_entries.clear();
+            Task::none()
+        }
+        Message::DeleteHistoryRange(since_ms) => {
+            state.history_entries = history::delete_since(since_ms);
+            Task::none()
+        }
+        Message::NavigateHistory(url) => {
+            state.show_history = false;
+            state.show_downloads = false;
+            // Restore full webview width when all panels close.
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, 0.0);
+            webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            navigate_current_tab(state, url);
+            Task::none()
+        }
+
+        Message::IpcReceived(msg) => {
+            handle_ipc(state, &msg);
+            Task::none()
+        }
+
+        Message::CycleTheme => {
+            state.theme_mode = match state.theme_mode {
+                ThemeMode::Dark  => ThemeMode::Light,
+                ThemeMode::Light => ThemeMode::Auto,
+                ThemeMode::Auto  => ThemeMode::Dark,
+            };
+            inject_theme(effective_dark(state.theme_mode));
+            Task::none()
+        }
+
+        Message::ToggleHistoryRecording => {
+            state.history_recording = !state.history_recording;
+            super::settings::save(&super::settings::BrowserSettings {
+                history_recording:   state.history_recording,
+                session_persistence: state.session_persistence_enabled,
+            });
+            Task::none()
+        }
+
+        Message::ToggleDownloads => {
+            state.show_history = false;
+            state.show_downloads = !state.show_downloads;
+            let right_w = right_panel_w(state);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            Task::none()
+        }
+
+        Message::DownloadStarted(url, temp_dest, final_dest) => {
+            // Debounce WKWebView double-fire: the same OS-level download intent
+            // can fire the callback twice within ~50 ms. A genuine user re-click
+            // always takes at least a few hundred ms, so 500 ms is a safe window.
+            const DEBOUNCE_MS: u128 = 500;
+            let is_double_fire = state
+                .recent_download_starts
+                .get(&url)
+                .map(|t| t.elapsed().as_millis() < DEBOUNCE_MS)
+                .unwrap_or(false);
+            if is_double_fire {
+                return Task::none();
+            }
+            state.recent_download_starts.insert(url.clone(), std::time::Instant::now());
+
+            // Derive a unique final_dest by appending -2, -3, … to the stem
+            // when a previous download (any status) already claimed this path
+            // or the file already exists on disk.
+            let unique_final = unique_download_dest(&final_dest, &state.downloads);
+            let unique_temp = unique_final.with_file_name(
+                format!(
+                    "{}.tkz",
+                    unique_final
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "download".to_string())
+                )
+            );
+
+            let id = state.next_download_id;
+            state.next_download_id += 1;
+            let filename = unique_final
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| {
+                    url.split('/').last().unwrap_or("download").to_string()
+                });
+            state.downloads.push(super::downloads::DownloadEntry {
+                id,
+                url: url.clone(),
+                filename,
+                temp_dest: unique_temp.clone(),
+                final_dest: unique_final.clone(),
+                bytes_downloaded: 0,
+                total_bytes: None,
+                speed_bps: 0,
+                status: super::downloads::DownloadStatus::InProgress,
+            });
+            // Persist stash so the URL is remembered if the app closes.
+            super::stash::save_stash(&state.downloads);
+            // Spawn our parallel reqwest downloader instead of using WebKit's.
+            super::downloader::spawn_download(id, url, unique_temp, unique_final);
+            Task::none()
+        }
+
+        // DownloadCompleted is no longer emitted: we removed wry's
+        // download_completed_handler because returning false from
+        // download_started_handler causes WebKit to fire it immediately with
+        // success=false, which would kill our reqwest download task. All
+        // completion/failure signals now come from downloader::drain_progress().
+        Message::DownloadCompleted(_url, _success) => Task::none(),
+
+        Message::ClearDoneDownloads => {
+            state.downloads.retain(|d| {
+                d.status == super::downloads::DownloadStatus::InProgress
+            });
+            Task::none()
+        }
+
+        Message::CancelDownload(id) => {
+            if let Some(dl) = state.downloads.iter_mut()
+                .find(|d| d.id == id
+                    && d.status == super::downloads::DownloadStatus::InProgress)
+            {
+                // Remove the partial .tkz file from disk.
+                let _ = std::fs::remove_file(&dl.temp_dest);
+                dl.status = super::downloads::DownloadStatus::Cancelled;
+            }
+            super::stash::save_stash(&state.downloads);
+            Task::none()
+        }
+
+        Message::DownloadProgress(id, bytes, total) => {
+            if let Some(dl) = state.downloads.iter_mut().find(|d| d.id == id) {
+                dl.bytes_downloaded = bytes;
+                if let Some(t) = total {
+                    dl.total_bytes = Some(t);
+                }
+            }
+            Task::none()
+        }
+
+        Message::DownloadFinished(id) => {
+            if let Some(dl) = state.downloads.iter_mut().find(|d| d.id == id) {
+                // The downloader already renamed the temp file to final_dest.
+                if let Ok(m) = std::fs::metadata(&dl.final_dest) {
+                    dl.bytes_downloaded = m.len();
+                }
+                dl.status = super::downloads::DownloadStatus::Completed;
+            }
+            super::stash::save_stash(&state.downloads);
+            Task::none()
+        }
+
+        Message::DownloadFailed(id) => {
+            if let Some(dl) = state.downloads.iter_mut().find(|d| d.id == id) {
+                dl.status = super::downloads::DownloadStatus::Failed;
+            }
+            super::stash::save_stash(&state.downloads);
+            Task::none()
+        }
+
+        Message::OpenDownloadedFile(id) => {
+            if let Some(dl) = state.downloads.iter()
+                .find(|d| d.id == id
+                    && d.status == super::downloads::DownloadStatus::Completed)
+            {
+                let path = dl.final_dest.clone();
+                open_path_with_system(&path, false);
+            }
+            Task::none()
+        }
+
+        Message::RevealDownload(id) => {
+            if let Some(dl) = state.downloads.iter()
+                .find(|d| d.id == id)
+            {
+                let path = if dl.status == super::downloads::DownloadStatus::Completed {
+                    dl.final_dest.clone()
+                } else {
+                    dl.temp_dest.clone()
+                };
+                open_path_with_system(&path, true);
+            }
+            Task::none()
+        }
+
+        Message::HistorySliderChanged(v) => {
+            state.history_delete_amount = v;
+            Task::none()
+        }
+
+        Message::HistoryUnitChanged(unit) => {
+            state.history_delete_unit = unit;
+            Task::none()
+        }
+
+        Message::DeleteHistoryByUnit => {
+            let since_ms = ms_ago(state.history_delete_amount, state.history_delete_unit);
+            state.history_entries = history::delete_since(since_ms);
+            Task::none()
+        }
+
+        Message::CreateTabGroup => {
+            let id = state.next_group_id;
+            state.next_group_id += 1;
+            let color_idx = id as usize % GROUP_COLORS.len();
+            let default_name = format!("Group {}", id + 1);
+            state.tab_groups.push(TabGroup { id, name: default_name.clone(), color_idx });
+            if let Some(t) = state.tabs.get_mut(state.active_tab) {
+                t.group_id = Some(id);
+            }
+            state.renaming_group = Some(id);
+            state.group_rename_text = default_name;
+            iced::widget::operation::focus::<Message>(iced::widget::Id::new("group_rename"))
+        }
+
+        Message::CycleTabGroup(tab_idx) => {
+            if let Some(t) = state.tabs.get_mut(tab_idx) {
+                t.group_id = match t.group_id {
+                    None => state.tab_groups.first().map(|g| g.id),
+                    Some(gid) => {
+                        let pos = state.tab_groups.iter().position(|g| g.id == gid);
+                        match pos {
+                            Some(p) if p + 1 < state.tab_groups.len() => Some(state.tab_groups[p + 1].id),
+                            _ => None,
+                        }
+                    }
+                };
+            }
+            cleanup_empty_groups(state);
+            Task::none()
+        }
+
+        Message::SetTabGroup(tab_idx, group_id) => {
+            if let Some(t) = state.tabs.get_mut(tab_idx) {
+                t.group_id = group_id;
+            }
+            cleanup_empty_groups(state);
+            Task::none()
+        }
+
+        Message::DeleteTabGroup(gid) => {
+            state.tab_groups.retain(|g| g.id != gid);
+            for t in state.tabs.iter_mut() {
+                if t.group_id == Some(gid) { t.group_id = None; }
+            }
+            Task::none()
+        }
+
+        Message::BeginRenameGroup(gid) => {
+            let name = state.tab_groups.iter()
+                .find(|g| g.id == gid)
+                .map(|g| g.name.clone())
+                .unwrap_or_default();
+            state.renaming_group = Some(gid);
+            state.group_rename_text = name;
+            iced::widget::operation::focus::<Message>(iced::widget::Id::new("group_rename"))
+        }
+
+        Message::GroupRenameChanged(s) => {
+            state.group_rename_text = s;
+            Task::none()
+        }
+
+        Message::CommitGroupRename => {
+            if let Some(gid) = state.renaming_group.take() {
+                if state.group_rename_text.trim().is_empty() {
+                    state.tab_groups.retain(|g| g.id != gid);
+                    for t in state.tabs.iter_mut() {
+                        if t.group_id == Some(gid) { t.group_id = None; }
+                    }
+                } else if let Some(g) = state.tab_groups.iter_mut().find(|g| g.id == gid) {
+                    g.name = state.group_rename_text.trim().to_string();
+                }
+                state.group_rename_text.clear();
+            }
+            Task::none()
+        }
+
+        Message::Tick(now) => {
+            let elapsed_secs = now.duration_since(state.last_tick).as_secs_f64().max(0.001);
+            state.last_tick = now;
+
+            let mut tasks: Vec<Task<Message>> = webview::drain_events()
+                .into_iter()
+                .map(|ev| match ev {
+                    BrowserEvent::PageStarted(u)        => Task::done(Message::PageStarted(u)),
+                    BrowserEvent::PageFinished(u)       => Task::done(Message::PageFinished(u)),
+                    BrowserEvent::TitleChanged(t)       => Task::done(Message::TitleChanged(t)),
+                    BrowserEvent::Ipc(msg)              => Task::done(Message::IpcReceived(msg)),
+                    BrowserEvent::DownloadStarted(u, tmp, fin) => Task::done(Message::DownloadStarted(u, tmp, fin)),
+                    BrowserEvent::DownloadCompleted(u, ok) => Task::done(Message::DownloadCompleted(u, ok)),
+                })
+                .collect();
+
+            // Drain progress updates from the parallel downloader.
+            // Apply Progress directly to state so view() sees it this same frame
+            // (going via Task::done() defers state mutation to the next cycle).
+            // Keep only the latest bytes value per download id, discarding
+            // intermediate chunks that accumulated between ticks.
+            {
+                use super::downloader::ProgressUpdate;
+                // Collect the last progress value per id, and any terminal events.
+                let mut latest: std::collections::HashMap<u64, (u64, Option<u64>)> =
+                    std::collections::HashMap::new();
+                let mut completed_ids: Vec<u64> = Vec::new();
+                let mut failed_ids:    Vec<u64> = Vec::new();
+
+                for update in super::downloader::drain_progress() {
+                    match update {
+                        ProgressUpdate::Progress { id, bytes, total } => {
+                            // Always overwrite so only the newest value survives.
+                            latest.insert(id, (bytes, total));
+                        }
+                        ProgressUpdate::Completed { id } => completed_ids.push(id),
+                        ProgressUpdate::Failed    { id } => failed_ids.push(id),
+                    }
+                }
+
+                // Mutate state in-place — view() will pick these up immediately.
+                for (id, (bytes, total)) in latest {
+                    if let Some(dl) = state.downloads.iter_mut().find(|d| d.id == id) {
+                        let delta = bytes.saturating_sub(dl.bytes_downloaded);
+                        dl.speed_bps = (delta as f64 / elapsed_secs) as u64;
+                        dl.bytes_downloaded = bytes;
+                        if let Some(t) = total {
+                            dl.total_bytes = Some(t);
+                        }
+                    }
+                }
+
+                // Terminal events still route through tasks so their handlers can
+                // update status, call save_stash, etc. in the normal update path.
+                for id in completed_ids {
+                    tasks.push(Task::done(Message::DownloadFinished(id)));
+                }
+                for id in failed_ids {
+                    tasks.push(Task::done(Message::DownloadFailed(id)));
+                }
+            }
+
+            if state.is_loading {
+                if state.load_progress < 1.0 {
+                    state.load_progress = (state.load_progress + LOAD_SPEED).min(1.0);
+                } else {
+                    state.load_alpha -= 0.045;
+                    if state.load_alpha <= 0.0 {
+                        state.load_alpha = 0.0;
+                        state.is_loading = false;
+                    }
+                }
+            }
+
+            let target_w = if state.tabs_hovered { PANEL_EXPANDED_W } else { PANEL_COLLAPSED_W };
+            if (state.tab_panel_w - target_w).abs() > 0.5 {
+                let prev_w = state.tab_panel_w;
+                state.tab_panel_w = if state.tab_panel_w < target_w {
+                    (state.tab_panel_w + PANEL_SPEED).min(target_w)
+                } else {
+                    (state.tab_panel_w - PANEL_SPEED).max(target_w)
+                };
+                if (state.tab_panel_w - prev_w).abs() > 0.1 {
+                    let right_w = right_panel_w(state);
+                    let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+                    webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+                }
+            }
+
+            // Deferred quicklinks + theme injection.
+            if state.needs_quicklinks_inject && webview::is_initialised() {
+                inject_quicklinks();
+                inject_theme(effective_dark(state.theme_mode));
+                state.needs_quicklinks_inject = false;
+            }
+
+            // Advance the download-button ring animation while downloads are active.
+            // Speed: 0.04 rad/tick @ 16 ms ≈ 2.5 rad/s → ~1 rotation every 2.5 s.
+            let has_active_dl = state.downloads.iter()
+                .any(|d| d.status == super::downloads::DownloadStatus::InProgress);
+            if has_active_dl {
+                state.download_anim_phase =
+                    (state.download_anim_phase + 0.04) % (2.0 * std::f32::consts::PI);
+            }
+
+            // ── API commands from BrowserHandle ───────────────────────────
+            // Drain into a Vec first so the mutable borrow on `state.api_rx`
+            // is released before we call helpers that also borrow `state`.
+            let api_msgs: Vec<_> = state.api_rx
+                .as_mut()
+                .map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).collect())
+                .unwrap_or_default();
+
+            for msg in api_msgs {
+                use super::api::{ApiMessage, TabTarget};
+                match msg {
+                    ApiMessage::Navigate(tab_target, raw_url) => {
+                        let url = resolve_url(&raw_url);
+                        match tab_target {
+                            TabTarget::Active => {
+                                navigate_current_tab(state, url);
+                            }
+                            TabTarget::New => {
+                                state.tabs.push(Tab::new(url.clone()));
+                                state.active_tab = state.tabs.len() - 1;
+                                state.address_input = url.clone();
+                                state.suppress_next_push = false;
+                                webview::navigate(&url);
+                            }
+                            TabTarget::Index(i) => {
+                                let i = if i < state.tabs.len() {
+                                    i
+                                } else {
+                                    state.tabs.push(Tab::new(url.clone()));
+                                    state.tabs.len() - 1
+                                };
+                                state.active_tab = i;
+                                state.address_input = url.clone();
+                                state.suppress_next_push = false;
+                                state.tabs[i].home_html = None;
+                                webview::navigate(&url);
+                            }
+                        }
+                    }
+                    ApiMessage::StartDownload(url) => {
+                        let (_, final_dest) = super::api::download_paths_for_url(&url);
+                        let unique_final = unique_download_dest(&final_dest, &state.downloads);
+                        let unique_temp = unique_final.with_file_name(format!(
+                            "{}.tkz",
+                            unique_final
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "download".to_string())
+                        ));
+                        let id = state.next_download_id;
+                        state.next_download_id += 1;
+                        let filename = unique_final
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| {
+                                url.split('/').last().unwrap_or("download").to_string()
+                            });
+                        state.downloads.push(super::downloads::DownloadEntry {
+                            id,
+                            url: url.clone(),
+                            filename,
+                            temp_dest: unique_temp.clone(),
+                            final_dest: unique_final.clone(),
+                            bytes_downloaded: 0,
+                            total_bytes: None,
+                            speed_bps: 0,
+                            status: super::downloads::DownloadStatus::InProgress,
+                        });
+                        super::stash::save_stash(&state.downloads);
+                        super::downloader::spawn_download(id, url, unique_temp, unique_final);
+                    }
+                    ApiMessage::SetTheme(mode) => {
+                        state.theme_mode = mode;
+                        inject_theme(effective_dark(state.theme_mode));
+                    }
+                    ApiMessage::OpenNewTab(maybe_url) => match maybe_url {
+                        None => {
+                            state.tabs.push(Tab::new_html(super::homepage_html_arc()));
+                            state.active_tab = state.tabs.len() - 1;
+                            state.address_input = String::new();
+                            state.needs_quicklinks_inject = true;
+                            webview::load_html(super::HOMEPAGE_HTML);
+                        }
+                        Some(raw_url) => {
+                            let url = resolve_url(&raw_url);
+                            state.tabs.push(Tab::new(url.clone()));
+                            state.active_tab = state.tabs.len() - 1;
+                            state.address_input = url.clone();
+                            state.suppress_next_push = false;
+                            webview::navigate(&url);
+                        }
+                    },
+                }
+            }
+
+            if tasks.is_empty() { Task::none() } else { Task::batch(tasks) }
+        }
+    }
+}
+
+pub fn view(state: &BrowserState) -> Element<'_, Message> {
+    let dark = effective_dark(state.theme_mode);
+    let nav_c = if dark { Color::from_rgb(0.75, 0.75, 0.85) } else { Color::from_rgb(0.22, 0.22, 0.32) };
+
+    let back_btn = Button::new(Text::new("←").size(18).color(nav_c))
+        .on_press(Message::Back)
+        .style(move |_theme, _status| nav_btn_style(dark));
+
+    let fwd_btn = Button::new(Text::new("→").size(16).color(nav_c))
+        .on_press(Message::Forward)
+        .style(move |_theme, _status| nav_btn_style(dark));
+
+    let reload_btn = Button::new(Text::new("↺").size(16).color(nav_c))
+        .on_press(Message::Reload)
+        .style(move |_theme, _status| nav_btn_style(dark));
+
+    let url_input = TextInput::new("Search or enter URL", &state.address_input)
+        .on_input(Message::AddressChanged)
+        .on_submit(Message::Navigate)
+        .padding(iced::Padding::from([5, 8]))
+        .size(13)
+        .width(Length::FillPortion(3))
+        .style(move |_theme, status| url_bar_style(matches!(status, text_input::Status::Focused { .. }), dark));
+
+    let icon_c = if dark { Color::from_rgb(0.52, 0.52, 0.62) } else { Color::from_rgb(0.35, 0.35, 0.46) };
+
+    let theme_icon = match state.theme_mode {
+        ThemeMode::Light => "☀️",
+        ThemeMode::Dark  => "🌙",
+        ThemeMode::Auto  => "⏰",
+    };
+    let theme_btn = Button::new(Text::new(theme_icon).size(12).color(icon_c))
+        .on_press(Message::CycleTheme)
+        .style(move |_theme, _status| nav_btn_style(dark));
+
+    let hist_btn = Button::new(Text::new("⏳").size(13).color(icon_c))
+        .on_press(Message::ToggleHistory)
+        .style(move |_theme, _status| nav_btn_style(dark));
+
+    let addr_bar_bg = if dark {
+        Color::from_rgb(0.09, 0.09, 0.12)
+    } else {
+        Color::from_rgb(0.91, 0.91, 0.94)
+    };
+    let active_dl_count = state.downloads.iter()
+        .filter(|d| d.status == super::downloads::DownloadStatus::InProgress)
+        .count();
+    let done_dl_count = state.downloads.iter()
+        .filter(|d| d.status == super::downloads::DownloadStatus::Completed)
+        .count();
+    let dl_ring = Canvas::new(DownloadRing {
+        active: active_dl_count,
+        done: done_dl_count,
+        phase: state.download_anim_phase,
+        dark,
+    })
+    .width(Length::Fixed(22.0))
+    .height(Length::Fixed(22.0));
+    let dl_btn = Button::new(dl_ring)
+        .on_press(Message::ToggleDownloads)
+        .padding(iced::Padding::from([2, 3]))
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            text_color: Color::TRANSPARENT,
+            snap: false,
+        });
+
+    let addr_bar = Container::new(
+        Row::new()
+            .push(back_btn)
+            .push(fwd_btn)
+            .push(reload_btn)
+            .push(Space::new().width(Length::Fixed(4.0)))
+            .push(url_input)
+            .push(Space::new().width(Length::FillPortion(1)))
+            .push(theme_btn)
+            .push(Space::new().width(Length::Fixed(2.0)))
+            .push(dl_btn)
+            .push(Space::new().width(Length::Fixed(2.0)))
+            .push(hist_btn)
+            .push(Space::new().width(Length::Fixed(6.0)))
+            .align_y(alignment::Vertical::Center)
+            .spacing(2),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(ADDR_BAR_H))
+    .align_y(alignment::Vertical::Center)
+    .padding(iced::Padding::from([0, 6]))
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(addr_bar_bg)),
+        border: iced::Border { color: Color::from_rgba(1.0, 1.0, 1.0, 0.04), width: 0.0, radius: 0.0.into() },
+        ..Default::default()
+    });
+
+    let tab_panel: Element<Message> = Canvas::new(VerticalTabBar {
+        tabs: state.tabs.clone(),
+        active: state.active_tab,
+        panel_w: state.tab_panel_w,
+        groups: state.tab_groups.clone(),
+        dark,
+    })
+    .width(Length::Fixed(state.tab_panel_w))
+    .height(Length::Fill)
+    .into();
+
+    let cph_bg = if dark { Color::from_rgb(0.04, 0.04, 0.06) } else { Color::from_rgb(0.95, 0.95, 0.97) };
+    let content_bg = Container::new(Space::new().width(Length::Fill).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(cph_bg)),
+            ..Default::default()
+        });
+
+    let content_stack: Element<Message> = Stack::new()
+        .push(content_bg)
+        .push(tab_panel)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+
+    let loader_canvas: Element<Message> = if state.is_loading || state.load_alpha > 0.0 {
+        Canvas::new(BorderTrace { progress: state.load_progress, alpha: state.load_alpha })
+            .width(Length::Fill).height(Length::Fill).into()
+    } else {
+        Space::new().width(Length::Fill).height(Length::Fill).into()
+    };
+
+    let main_bg = if dark { Color::from_rgb(0.06, 0.06, 0.08) } else { Color::from_rgb(0.93, 0.93, 0.96) };
+    let main_layout: Element<Message> = Container::new(
+        Column::new()
+            .push(addr_bar)
+            .push(content_stack)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(main_bg)),
+        ..Default::default()
+    })
+    .into();
+
+    let hist_layer: Element<Message> = if state.show_history {
+        let panel_h = (state.window_size.height - ADDR_BAR_H).max(200.0);
+        Container::new(
+            Column::new()
+                .push(Space::new().height(Length::Fixed(ADDR_BAR_H)))
+                .push(history_panel(
+                    &state.history_entries,
+                    panel_h,
+                    dark,
+                    state.history_recording,
+                    state.history_delete_amount,
+                    state.history_delete_unit,
+                )),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Right)
+        .into()
+    } else {
+        Space::new().width(Length::Fill).height(Length::Fill).into()
+    };
+
+    let popup_bg = if dark {
+        Color::from_rgba(0.07, 0.07, 0.11, 0.97)
+    } else {
+        Color::from_rgba(0.96, 0.96, 0.98, 0.97)
+    };
+    let rename_layer: Element<Message> = if state.renaming_group.is_some() {
+        Container::new(
+            Column::new()
+                .push(Space::new().height(Length::Fill))
+                .push(
+                    Container::new(
+                        TextInput::new("Group name", &state.group_rename_text)
+                            .id(iced::widget::Id::new("group_rename"))
+                            .on_input(Message::GroupRenameChanged)
+                            .on_submit(Message::CommitGroupRename)
+                            .padding(iced::Padding::from([4, 8]))
+                            .size(13)
+                            .style(move |_theme, status| url_bar_style(
+                                matches!(status, text_input::Status::Focused { .. }), dark
+                            )),
+                    )
+                    .width(Length::Fixed(180.0))
+                    .padding(iced::Padding::from([4, 8]))
+                    .style(move |_| container::Style {
+                        background: Some(iced::Background::Color(popup_bg)),
+                        border: iced::Border {
+                            color: Color::from_rgba(0.467, 0.0, 1.0, 0.4),
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    }),
+                )
+                .push(Space::new().height(Length::Fixed(8.0)))
+                .width(Length::Fixed(state.tab_panel_w.max(180.0)))
+                .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        Space::new().width(Length::Fill).height(Length::Fill).into()
+    };
+
+    let downloads_layer: Element<Message> = if state.show_downloads {
+        let panel_h = (state.window_size.height - ADDR_BAR_H).max(200.0);
+        Container::new(
+            Column::new()
+                .push(Space::new().height(Length::Fixed(ADDR_BAR_H)))
+                .push(downloads_panel(&state.downloads, panel_h, dark, state.download_anim_phase)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Right)
+        .into()
+    } else {
+        Space::new().width(Length::Fill).height(Length::Fill).into()
+    };
+
+    Stack::new()
+        .push(main_layout)
+        .push(loader_canvas)
+        .push(hist_layer)
+        .push(downloads_layer)
+        .push(rename_layer)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+pub fn subscription(state: &BrowserState) -> Subscription<Message> {
+    use iced::time;
+
+    let opened  = window::open_events().map(Message::WindowOpened);
+    let resized = window::resize_events()
+        .map(|(id, size)| Message::WindowResized(id, size));
+    let window_subs = Subscription::batch([opened, resized]);
+
+    let target_w = if state.tabs_hovered { PANEL_EXPANDED_W } else { PANEL_COLLAPSED_W };
+    let needs_fast_tick = state.is_loading
+        || state.load_alpha > 0.0
+        || !webview::is_initialised()
+        || (state.tab_panel_w - target_w).abs() > 0.5
+        || state.downloads.iter().any(|d| d.status == super::downloads::DownloadStatus::InProgress)
+        || state.download_anim_phase > 0.0;
+
+    let tick_rate = if needs_fast_tick {
+        Duration::from_millis(16)
+    } else {
+        Duration::from_millis(100)
+    };
+
+    Subscription::batch([
+        window_subs,
+        time::every(tick_rate).map(Message::Tick),
+    ])
+}
+
+pub fn theme(state: &BrowserState) -> Theme {
+    if effective_dark(state.theme_mode) { Theme::Dark } else { Theme::Light }
+}
+
+pub fn content_bounds(window_size: Size, tab_panel_w: f32, history_w: f32) -> (f32, f32, f32, f32) {
+    let x = tab_panel_w + INSET;
+    let y = CHROME_H + INSET;
+    let w = (window_size.width - tab_panel_w - history_w - 2.0 * INSET).max(0.0);
+    let h = (window_size.height - CHROME_H - 2.0 * INSET).max(0.0);
+    (x, y, w, h)
+}
+
+fn resolve_url(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("file://")
+    {
+        trimmed.to_string()
+    } else if trimmed.contains('.') && !trimmed.contains(' ') {
+        format!("https://{trimmed}")
+    } else {
+        format!(
+            "https://www.google.com/search?q={}",
+            urlencoding::encode(trimmed)
+        )
+    }
+}
+
+fn navigate_current_tab(state: &mut BrowserState, url: String) {
+    if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+        tab.url = url.clone();
+        // home_html is intentionally preserved — needed if user later presses Back
+        // to a tkz:home entry in this tab's nav_history.
+    }
+    // Reset so the next PageFinished records this navigation in per-tab history.
+    state.suppress_next_push = false;
+    webview::navigate(&url);
+}
+
+fn create_webview_task(
+    id: window::Id,
+    size: Size,
+    url: Option<String>,
+    html: Option<String>,
+) -> Task<()> {
+    let (cx, cy, cw, ch) = content_bounds(size, PANEL_COLLAPSED_W, 0.0);
+    window::run(id, move |window| {
+        let raw = match window.window_handle() {
+            Ok(h) => h.as_raw(),
+            Err(e) => { eprintln!("[browser] window_handle error: {e}"); return; }
+        };
+        webview::create(raw, url, html, cx as f64, cy as f64, cw as f64, ch as f64);
+    })
+}
+
+fn nav_btn_style(dark: bool) -> button::Style {
+    button::Style {
+        background: None,
+        border: iced::Border::default(),
+        shadow: iced::Shadow::default(),
+        text_color: if dark {
+            Color::from_rgb(0.75, 0.75, 0.85)
+        } else {
+            Color::from_rgb(0.22, 0.22, 0.32)
+        },
+        snap: false,
+    }
+}
+
+fn url_bar_style(focused: bool, dark: bool) -> text_input::Style {
+    const UV: Color = Color { r: 0.467, g: 0.0, b: 1.0, a: 1.0 };
+    let bg_rest = if dark {
+        Color::from_rgba(0.0, 0.0, 0.0, 0.0)
+    } else {
+        Color::from_rgba(1.0, 1.0, 1.0, 0.55)
+    };
+    text_input::Style {
+        background: iced::Background::Color(
+            if focused { Color::from_rgba(0.467, 0.0, 1.0, 0.06) } else { bg_rest }
+        ),
+        border: iced::Border {
+            color: if focused { UV } else { Color::from_rgba(0.467, 0.0, 1.0, 0.12) },
+            width: if focused { 1.0 } else { 0.5 },
+            radius: 6.0.into(),
+        },
+        icon: Color::from_rgb(0.5, 0.5, 0.58),
+        placeholder: if dark { Color::from_rgb(0.35, 0.35, 0.44) } else { Color::from_rgb(0.50, 0.50, 0.58) },
+        value: if dark { Color::from_rgb(0.88, 0.88, 0.95) } else { Color::from_rgb(0.10, 0.10, 0.18) },
+        selection: Color { r: 0.467, g: 0.0, b: 1.0, a: 0.30 },
+    }
+}
+
+// ── history panel ─────────────────────────────────────────────────────────────
+
+fn history_panel(
+    entries: &[history::HistoryEntry],
+    panel_h: f32,
+    dark: bool,
+    recording: bool,
+    delete_amount: f32,
+    delete_unit: TimeUnit,
+) -> Element<'_, Message> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Compute once; passed into format_relative_time for every entry so the
+    // syscall fires exactly once per panel render instead of once per entry.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let close_btn = Button::new(
+        Text::new("✕").size(13).color(
+            if dark { Color::from_rgb(0.65, 0.65, 0.70) } else { Color::from_rgb(0.30, 0.30, 0.36) }
+        ),
+    )
+    .on_press(Message::ToggleHistory)
+    .style(move |_theme, _status| nav_btn_style(dark));
+
+    // ● = recording on (clickable to disable)  ○ = paused (clickable to re-enable)
+    let rec_label = if recording { "● Rec" } else { "○ Off" };
+    let rec_color = if recording {
+        if dark { Color::from_rgb(0.30, 0.85, 0.45) } else { Color::from_rgb(0.12, 0.65, 0.30) }
+    } else {
+        if dark { Color::from_rgb(0.75, 0.35, 0.35) } else { Color::from_rgb(0.70, 0.20, 0.20) }
+    };
+    let rec_btn = Button::new(Text::new(rec_label).size(10).color(rec_color))
+        .on_press(Message::ToggleHistoryRecording)
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            border: iced::Border {
+                color: rec_color,
+                width: 0.75,
+                radius: 4.0.into(),
+            },
+            shadow: iced::Shadow::default(),
+            text_color: rec_color,
+            snap: false,
+        });
+
+    let header = Container::new(
+        Row::new()
+            .push(Text::new("History").size(14).color(
+                if dark { Color::from_rgb(0.85, 0.85, 0.92) } else { Color::from_rgb(0.15, 0.15, 0.22) }
+            ))
+            .push(Space::new().width(Length::Fill))
+            .push(rec_btn)
+            .push(Space::new().width(Length::Fixed(6.0)))
+            .push(close_btn)
+            .align_y(alignment::Vertical::Center),
+    )
+    .width(Length::Fill)
+    .padding(iced::Padding::from([10, 12]));
+
+    let lbl_c = if dark { Color::from_rgb(0.45, 0.45, 0.52) } else { Color::from_rgb(0.38, 0.38, 0.46) };
+    let del_slider = Slider::new(1.0f32..=100.0, delete_amount, Message::HistorySliderChanged)
+        .step(1.0);
+    let unit_picker = PickList::new(TIME_UNITS, Some(delete_unit), Message::HistoryUnitChanged)
+        .text_size(10)
+        .padding(iced::Padding::from([3, 5]));
+    let del_by_unit = Button::new(Text::new("Delete").size(11))
+        .on_press(Message::DeleteHistoryByUnit)
+        .style(|_theme, _status| del_range_btn_style());
+    let del_all = Button::new(Text::new("Clear all").size(11))
+        .on_press(Message::DeleteAllHistory)
+        .style(|_theme, _status| del_all_btn_style());
+
+    let del_row = Container::new(
+        Column::new()
+            .push(
+                Row::new()
+                    .push(Text::new("Back:").size(10).color(lbl_c))
+                    .push(Space::new().width(Length::Fixed(4.0)))
+                    .push(del_slider)
+                    .push(Space::new().width(Length::Fixed(4.0)))
+                    .push(
+                        Text::new(format!("{}", delete_amount.round() as u32))
+                            .size(10).color(lbl_c)
+                    )
+                    .push(Space::new().width(Length::Fixed(4.0)))
+                    .push(unit_picker)
+                    .align_y(alignment::Vertical::Center)
+                    .width(Length::Fill),
+            )
+            .push(Space::new().height(Length::Fixed(4.0)))
+            .push(
+                Row::new()
+                    .push(del_by_unit)
+                    .push(Space::new().width(Length::Fill))
+                    .push(del_all)
+                    .align_y(alignment::Vertical::Center),
+            )
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding(iced::Padding::from([6, 12]));
+
+    let divider: Element<Message> = Container::new(
+        Space::new().width(Length::Fill).height(Length::Fixed(1.0)),
+    )
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(
+            if dark { Color::from_rgba(1.0, 1.0, 1.0, 0.06) } else { Color::from_rgba(0.0, 0.0, 0.0, 0.08) }
+        )),
+        ..Default::default()
+    })
+    .into();
+
+    let mut list_col = Column::new().spacing(0).width(Length::Fill);
+
+    if entries.is_empty() {
+        list_col = list_col.push(
+            Container::new(
+                Text::new("No history yet")
+                    .size(12)
+                    .color(if dark { Color::from_rgb(0.38, 0.38, 0.45) } else { Color::from_rgb(0.50, 0.50, 0.58) }),
+            )
+            .width(Length::Fill)
+            .padding(iced::Padding::from([24, 12]))
+            .align_x(alignment::Horizontal::Center),
+        );
+    }
+
+    for e in entries.iter().rev() {
+        let url = e.url.clone();
+        let short_url = short_url_display(&e.url);
+        let display = if e.title.is_empty() {
+            short_url.clone()
+        } else {
+            e.title.clone()
+        };
+        let item: Element<Message> = Button::new(
+            Column::new()
+                .push(
+                    Text::new(display)
+                        .size(12)
+                        .color(if dark { Color::from_rgb(0.82, 0.82, 0.88) } else { Color::from_rgb(0.12, 0.12, 0.20) }),
+                )
+                .push(
+                    Text::new(short_url)
+                        .size(10)
+                        .color(if dark { Color::from_rgb(0.42, 0.42, 0.52) } else { Color::from_rgb(0.38, 0.38, 0.50) }),
+                )
+                .push(
+                    Text::new(format_relative_time(e.timestamp_ms, now_ms))
+                        .size(9)
+                        .color(if dark { Color::from_rgb(0.32, 0.32, 0.40) } else { Color::from_rgb(0.50, 0.50, 0.58) }),
+                )
+                .spacing(1),
+        )
+        .on_press(Message::NavigateHistory(url))
+        .width(Length::Fill)
+        .padding(iced::Padding::from([6, 12]))
+        .style(move |_theme, status| {
+            let hovered = matches!(status, button::Status::Hovered);
+            button::Style {
+                background: if hovered {
+                    Some(iced::Background::Color(if dark {
+                        Color::from_rgba(1.0, 1.0, 1.0, 0.05)
+                    } else {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.05)
+                    }))
+                } else { None },
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                text_color: if dark { Color::WHITE } else { Color::from_rgb(0.10, 0.10, 0.18) },
+                snap: false,
+            }
+        })
+        .into();
+        list_col = list_col.push(item);
+    }
+
+    // iced's Column distributes Fill-height children by giving each the full
+    // child_limits max, which causes the Column to wrap the Scrollable into a
+    // second invisible column.  Use Fixed heights instead to sidestep this.
+    let list_h = (panel_h - 115.0).max(80.0);
+    let list = Scrollable::new(list_col).height(Length::Fixed(list_h));
+
+    Container::new(
+        Column::new()
+            .push(header)
+            .push(del_row)
+            .push(divider)
+            .push(list)
+            .width(Length::Fixed(280.0)),
+    )
+    .width(Length::Fixed(280.0))
+    .height(Length::Fixed(panel_h))
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(
+            if dark { Color::from_rgba(0.07, 0.07, 0.11, 0.97) } else { Color::from_rgba(0.96, 0.96, 0.98, 0.98) }
+        )),
+        border: iced::Border {
+            color: Color::from_rgba(0.467, 0.0, 1.0, if dark { 0.22 } else { 0.30 }),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        ..Default::default()
+    })
+    .into()
+}
+
+// ── downloads panel ────────────────────────────────────────────────────────────
+
+fn downloads_panel(
+    entries: &[super::downloads::DownloadEntry],
+    panel_h: f32,
+    dark: bool,
+    anim_phase: f32,
+) -> Element<'_, Message> {
+    use super::downloads::DownloadStatus;
+
+    let text_c = if dark { Color::from_rgb(0.85, 0.85, 0.92) } else { Color::from_rgb(0.15, 0.15, 0.22) };
+    let sub_c  = if dark { Color::from_rgb(0.42, 0.42, 0.52) } else { Color::from_rgb(0.38, 0.38, 0.50) };
+
+    let close_btn = Button::new(
+        Text::new("\u{2715}").size(13).color(
+            if dark { Color::from_rgb(0.65, 0.65, 0.70) } else { Color::from_rgb(0.30, 0.30, 0.36) }
+        ),
+    )
+    .on_press(Message::ToggleDownloads)
+    .style(move |_theme, _status| nav_btn_style(dark));
+
+    let clear_btn = Button::new(Text::new("Clear done").size(10))
+        .on_press(Message::ClearDoneDownloads)
+        .style(move |_theme, _status| button::Style {
+            background: None,
+            border: iced::Border {
+                color: Color::from_rgba(0.467, 0.0, 1.0, 0.25),
+                width: 0.75,
+                radius: 4.0.into(),
+            },
+            shadow: iced::Shadow::default(),
+            text_color: if dark {
+                Color::from_rgb(0.50, 0.50, 0.70)
+            } else {
+                Color::from_rgb(0.30, 0.30, 0.55)
+            },
+            snap: false,
+        });
+
+    let header = Container::new(
+        Row::new()
+            .push(Text::new("Downloads").size(14).color(text_c))
+            .push(Space::new().width(Length::Fill))
+            .push(clear_btn)
+            .push(Space::new().width(Length::Fixed(6.0)))
+            .push(close_btn)
+            .align_y(alignment::Vertical::Center),
+    )
+    .width(Length::Fill)
+    .padding(iced::Padding::from([10, 12]));
+
+    let divider = || -> Element<Message> {
+        Container::new(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(
+                    if dark { Color::from_rgba(1.0, 1.0, 1.0, 0.06) } else { Color::from_rgba(0.0, 0.0, 0.0, 0.08) }
+                )),
+                ..Default::default()
+            })
+            .into()
+    };
+
+    let mut list_col = Column::new().spacing(0).width(Length::Fill);
+    if entries.is_empty() {
+        list_col = list_col.push(
+            Container::new(Text::new("No downloads yet").size(12).color(sub_c))
+                .width(Length::Fill)
+                .padding(iced::Padding::from([24, 12]))
+                .align_x(alignment::Horizontal::Center),
+        );
+    }
+
+    for entry in entries.iter().rev() {
+        let id = entry.id;
+        let final_dest = entry.final_dest.clone();
+        let bytes_str = if let Some(total) = entry.total_bytes {
+            format!("{} / {}", format_bytes(entry.bytes_downloaded), format_bytes(total))
+        } else {
+            format_bytes(entry.bytes_downloaded)
+        };
+        let speed_str = if entry.speed_bps > 0
+            && entry.status == DownloadStatus::InProgress
+        {
+            format!("  {}/s", format_bytes(entry.speed_bps))
+        } else {
+            String::new()
+        };
+
+        let status_row: Element<Message> = match entry.status {
+            DownloadStatus::InProgress => {
+                // Deterministic bar when total size is known, oscillating otherwise.
+                let bar_val = match entry.total_bytes {
+                    Some(total) if total > 0 =>
+                        (entry.bytes_downloaded as f32 / total as f32).clamp(0.0, 1.0),
+                    _ => (anim_phase.sin() * 0.5 + 0.5).clamp(0.0, 1.0),
+                };
+                Column::new()
+                    .push(
+                        Row::new()
+                            .push(Text::new(format!("\u{2b07} {}{}", bytes_str, speed_str)).size(10).color(
+                                if dark { Color::from_rgb(0.40, 0.70, 1.0) } else { Color::from_rgb(0.10, 0.40, 0.80) }
+                            ))
+                            .push(Space::new().width(Length::Fill))
+                            .push(
+                                Button::new(Text::new("Cancel").size(9))
+                                    .on_press(Message::CancelDownload(id))
+                                    .padding(iced::Padding::from([2, 5]))
+                                    .style(|_theme, _status| button::Style {
+                                        background: Some(iced::Background::Color(
+                                            Color::from_rgba(0.8, 0.15, 0.15, 0.20)
+                                        )),
+                                        border: iced::Border {
+                                            color: Color::from_rgba(1.0, 0.35, 0.35, 0.40),
+                                            width: 1.0,
+                                            radius: 4.0.into(),
+                                        },
+                                        shadow: iced::Shadow::default(),
+                                        text_color: Color::from_rgb(0.92, 0.55, 0.55),
+                                        snap: false,
+                                    })
+                            )
+                            .align_y(alignment::Vertical::Center),
+                    )
+                    .push(Space::new().height(Length::Fixed(4.0)))
+                    .push(
+                        ProgressBar::new(0.0..=1.0, bar_val)
+                            .girth(Length::Fixed(4.0))
+                            .style(move |_theme| progress_bar::Style {
+                                background: iced::Background::Color(
+                                    if dark { Color::from_rgba(1.0, 1.0, 1.0, 0.10) } else { Color::from_rgba(0.0, 0.0, 0.0, 0.10) }
+                                ),
+                                bar: iced::Background::Color(Color { r: 0.467, g: 0.0, b: 1.0, a: 1.0 }),
+                                border: iced::Border { radius: 2.0.into(), ..Default::default() },
+                            })
+                    )
+                    .spacing(0)
+                    .into()
+            }
+            DownloadStatus::Completed => {
+                let _fp = final_dest.clone();
+                Row::new()
+                    .push(
+                        Text::new(format!("\u{2713} {} \u{2014} {}", bytes_str,
+                            if dark { "Done" } else { "Done" }))
+                            .size(10)
+                            .color(if dark { Color::from_rgb(0.30, 0.85, 0.45) } else { Color::from_rgb(0.10, 0.60, 0.25) })
+                    )
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        Button::new(Text::new("Open").size(9))
+                            .on_press(Message::OpenDownloadedFile(id))
+                            .padding(iced::Padding::from([2, 5]))
+                            .style(move |_theme, _status| small_action_btn_style(dark))
+                    )
+                    .push(Space::new().width(Length::Fixed(3.0)))
+                    .push(
+                        Button::new(Text::new("Reveal").size(9))
+                            .on_press(Message::RevealDownload(id))
+                            .padding(iced::Padding::from([2, 5]))
+                            .style(move |_theme, _status| small_action_btn_style(dark))
+                    )
+                    .align_y(alignment::Vertical::Center)
+                    .into()
+            }
+            DownloadStatus::Failed => {
+                Text::new("\u{2717} Failed")
+                    .size(10)
+                    .color(if dark { Color::from_rgb(0.90, 0.40, 0.40) } else { Color::from_rgb(0.75, 0.15, 0.15) })
+                    .into()
+            }
+            DownloadStatus::Cancelled => {
+                Text::new("\u{2715} Cancelled")
+                    .size(10)
+                    .color(if dark { Color::from_rgb(0.60, 0.60, 0.65) } else { Color::from_rgb(0.45, 0.45, 0.50) })
+                    .into()
+            }
+        };
+
+        let item: Element<Message> = Container::new(
+            Column::new()
+                .push(Text::new(&entry.filename).size(12).color(text_c))
+                .push(Text::new(short_url_display(&entry.url)).size(10).color(sub_c))
+                .push(Space::new().height(Length::Fixed(3.0)))
+                .push(status_row)
+                .spacing(1),
+        )
+        .width(Length::Fill)
+        .padding(iced::Padding::from([8, 12]))
+        .style(move |_| container::Style {
+            border: iced::Border {
+                color: if dark {
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.04)
+                } else {
+                    Color::from_rgba(0.0, 0.0, 0.0, 0.05)
+                },
+                width: 0.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into();
+        list_col = list_col.push(item);
+        list_col = list_col.push(divider());
+    }
+
+    let list_h = (panel_h - 80.0).max(80.0);
+    let list = Scrollable::new(list_col).height(Length::Fixed(list_h));
+
+    Container::new(
+        Column::new()
+            .push(header)
+            .push(divider())
+            .push(list)
+            .width(Length::Fixed(280.0)),
+    )
+    .width(Length::Fixed(280.0))
+    .height(Length::Fixed(panel_h))
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(
+            if dark {
+                Color::from_rgba(0.07, 0.07, 0.11, 0.97)
+            } else {
+                Color::from_rgba(0.96, 0.96, 0.98, 0.98)
+            },
+        )),
+        border: iced::Border {
+            color: Color::from_rgba(0.467, 0.0, 1.0, if dark { 0.22 } else { 0.30 }),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        ..Default::default()
+    })
+    .into()
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────────
+
+/// Width of whichever right-side panel is currently open (0 if none).
+fn right_panel_w(state: &BrowserState) -> f32 {
+    if state.show_history || state.show_downloads { 280.0 } else { 0.0 }
+}
+
+/// Open `path` with the system default application.
+/// If `reveal` is `true`, reveal it in the file manager instead.
+fn open_path_with_system(path: &std::path::Path, reveal: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        if reveal {
+            let _ = std::process::Command::new("open")
+                .args(["-R"])
+                .arg(path)
+                .spawn();
+        } else {
+            let _ = std::process::Command::new("open")
+                .arg(path)
+                .spawn();
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if reveal {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
+                .spawn();
+        } else {
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", ""])
+                .arg(path)
+                .spawn();
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let target = if reveal {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+    }
+}
+
+/// Compute the Unix timestamp (ms) that is `amount` `unit`s before now.
+fn ms_ago(amount: f32, unit: TimeUnit) -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let n = amount.round() as u64;
+    let delta_ms: u64 = match unit {
+        TimeUnit::Seconds => n * 1_000,
+        TimeUnit::Minutes => n * 60 * 1_000,
+        TimeUnit::Hours   => n * 3_600 * 1_000,
+        TimeUnit::Days    => n * 86_400 * 1_000,
+        TimeUnit::Months  => n * 30 * 86_400 * 1_000,
+        TimeUnit::Years   => n * 365 * 86_400 * 1_000,
+    };
+    now_ms.saturating_sub(delta_ms)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.0} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Return a path that doesn't conflict with any existing download entry or
+/// on-disk file by appending `-2`, `-3`, … to the file stem when needed.
+/// e.g. `video.mp4` → `video-2.mp4` → `video-3.mp4` …
+fn unique_download_dest(
+    base: &std::path::Path,
+    downloads: &[super::downloads::DownloadEntry],
+) -> std::path::PathBuf {
+    let conflicts = |p: &std::path::Path| -> bool {
+        downloads.iter().any(|d| d.final_dest == p || d.temp_dest == p)
+            || p.exists()
+    };
+    if !conflicts(base) {
+        return base.to_path_buf();
+    }
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = base
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = base.parent().unwrap_or(std::path::Path::new("."));
+    for n in 2u32.. {
+        let candidate = parent.join(format!("{}-{}{}", stem, n, ext));
+        if !conflicts(&candidate) {
+            return candidate;
+        }
+    }
+    base.to_path_buf()
+}
+
+fn small_action_btn_style(dark: bool) -> button::Style {
+    button::Style {
+        background: Some(iced::Background::Color(
+            if dark { Color::from_rgba(1.0, 1.0, 1.0, 0.07) } else { Color::from_rgba(0.0, 0.0, 0.0, 0.07) }
+        )),
+        border: iced::Border {
+            color: if dark { Color::from_rgba(1.0, 1.0, 1.0, 0.12) } else { Color::from_rgba(0.0, 0.0, 0.0, 0.12) },
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        text_color: if dark { Color::from_rgb(0.72, 0.72, 0.80) } else { Color::from_rgb(0.25, 0.25, 0.35) },
+        snap: false,
+    }
+}
+
+fn format_relative_time(ms: u64, now_ms: u64) -> String {
+    let diff_s = now_ms.saturating_sub(ms) / 1000;
+    if diff_s < 60 {
+        format!("{}s ago", diff_s)
+    } else if diff_s < 3600 {
+        format!("{}m ago", diff_s / 60)
+    } else if diff_s < 86400 {
+        format!("{}h ago", diff_s / 3600)
+    } else {
+        format!("{}d ago", diff_s / 86400)
+    }
+}
+
+fn short_url_display(url: &str) -> String {
+    let s = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    // Walk by char boundary — no Vec<char> allocation needed.
+    match s.char_indices().nth(38) {
+        Some((byte_pos, _)) => format!("{}\u{2026}", &s[..byte_pos]),
+        None => s.to_string(),
+    }
+}
+
+fn del_range_btn_style() -> button::Style {
+    button::Style {
+        background: Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.07))),
+        border: iced::Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.10),
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        text_color: Color::from_rgb(0.65, 0.65, 0.72),
+        snap: false,
+    }
+}
+
+fn del_all_btn_style() -> button::Style {
+    button::Style {
+        background: Some(iced::Background::Color(Color::from_rgba(0.8, 0.1, 0.1, 0.20))),
+        border: iced::Border {
+            color: Color::from_rgba(1.0, 0.3, 0.3, 0.35),
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        text_color: Color::from_rgb(0.92, 0.55, 0.55),
+        snap: false,
+    }
+}
+
+// ── IPC handling ──────────────────────────────────────────────────────────────
+
+/// Parse and act on an IPC message from `window.ipc.postMessage(json)`.
+///
+/// Messages are JSON objects with a `type` field:
+/// ```json
+/// {"type":"add_quicklink","url":"https://…","title":"Page Title"}
+/// {"type":"remove_quicklink","url":"https://…"}
+/// {"type":"reorder_quicklinks","order":[2,0,1]}
+/// ```
+fn handle_ipc(state: &BrowserState, msg: &str) {
+    // Minimal hand-rolled JSON field extractor — avoids a serde dependency.
+    let get = |key: &str| -> Option<String> {
+        let needle = format!("\"{}\":", key);
+        let start = msg.find(needle.as_str())? + needle.len();
+        let rest = msg[start..].trim_start();
+        if rest.starts_with('"') {
+            let inner = &rest[1..];
+            let end = inner.find('"')?;
+            Some(inner[..end].to_string())
+        } else if rest.starts_with('[') {
+            // JSON array — read until the matching ']'
+            let end = rest.find(']').map(|i| i + 1).unwrap_or(rest.len());
+            Some(rest[..end].to_string())
+        } else {
+            // number or other scalar — read until delimiter
+            let end = rest.find(|c: char| c == ',' || c == '}').unwrap_or(rest.len());
+            Some(rest[..end].trim().to_string())
+        }
+    };
+
+    let Some(kind) = get("type") else { return };
+
+    match kind.as_str() {
+        "add_quicklink" => {
+            let url   = get("url").unwrap_or_default();
+            let title = get("title").unwrap_or_default();
+            if !url.is_empty() {
+                let links = quicklinks::add(url, title);
+                // If we're currently on the homepage, refresh its quicklinks.
+                if state.tabs.get(state.active_tab)
+                    .map(|t| t.url == "tkz:home")
+                    .unwrap_or(false)
+                {
+                    inject_quicklinks_from(&links);
+                }
+            }
+        }
+        "remove_quicklink" => {
+            let url = get("url").unwrap_or_default();
+            if !url.is_empty() {
+                let links = quicklinks::remove(&url);
+                inject_quicklinks_from(&links);
+            }
+        }
+        "reorder_quicklinks" => {
+            // Parse a simple JSON array of integers like [2,0,1]
+            if let Some(raw) = get("order") {
+                // `get` returns the raw "[2,0,1]" string
+                let indices: Vec<usize> = raw
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<usize>().ok())
+                    .collect();
+                let links = quicklinks::load();
+                // Build reordered list from index array.
+                let reordered: Vec<quicklinks::QuickLink> = indices.iter()
+                    .filter_map(|&i| links.get(i).cloned())
+                    .collect();
+                quicklinks::save(&reordered);
+                inject_quicklinks_from(&reordered);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Returns true if the effective theme is dark (accounting for Auto + local time).
+fn effective_dark(mode: ThemeMode) -> bool {
+    match mode {
+        ThemeMode::Dark  => true,
+        ThemeMode::Light => false,
+        ThemeMode::Auto  => {
+            use chrono::Timelike;
+            let h = chrono::Local::now().hour();
+            !(7..19).contains(&h)
+        }
+    }
+}
+
+/// Inject the current theme into the active homepage via JS.
+fn inject_theme(dark: bool) {
+    let t = if dark { "dark" } else { "light" };
+    webview::eval_script(&format!(
+        "if(window.__tkzSetTheme)window.__tkzSetTheme({dark});\
+         localStorage.setItem('tkz-theme','{t}');",
+        dark = dark,
+    ));
+}
+
+/// Push the given quicklinks list into the active homepage via JS eval.
+fn inject_quicklinks_from(links: &[quicklinks::QuickLink]) {
+    let json  = quicklinks::to_json(links);
+    let js    = format!("if(window.__tkzSetLinks)window.__tkzSetLinks({json});");
+    webview::eval_script(&js);
+}
+
+/// Load quicklinks from disk and inject them (used for tab-switch / init).
+fn inject_quicklinks() {
+    inject_quicklinks_from(&quicklinks::load());
+}
+
+/// Remove tab groups that no longer have any member tabs.
+fn cleanup_empty_groups(state: &mut BrowserState) {
+    state.tab_groups.retain(|g| state.tabs.iter().any(|t| t.group_id == Some(g.id)));
+}

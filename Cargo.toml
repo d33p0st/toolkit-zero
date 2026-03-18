@@ -1,6 +1,6 @@
 [package]
 name = "toolkit-zero"
-version = "4.0.2"
+version = "5.0.0"
 edition = "2024"
 rust-version = "1.85"
 build = "build.rs"
@@ -41,17 +41,23 @@ http    = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper   = { version = "1", features = ["server", "http1", "http2"], optional = true }
 hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "tokio"], optional = true }
-log     = { version = "0.4.29", optional = true }
+log     = { version = "0.4", optional = true }
 rand    = { version = "0.9", optional = true }
-reqwest = { version = "0.13.2", optional = true, features = ["blocking", "json", "query"] }
+reqwest = { version = "0.13", optional = true, features = ["blocking", "json", "query", "stream"] }
 scrypt      = { version = "0.11", optional = true }
-serde       = { version = "1.0.228", optional = true }
+serde       = { version = "1", optional = true }
 serde_json  = { version = "1", optional = true }
 sha2        = { version = "0.10", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
-tokio   = { version = "1.50.0", features = ["full"], optional = true }
+tokio   = { version = "1", features = ["full"], optional = true }
 webbrowser = { version = "0.8", optional = true }
 zeroize = { version = "1", optional = true, features = ["derive"] }
+iced = { version = "0.14", optional = true, features = ["canvas", "tokio", "image"] }
+wry = { version = "0.54", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSData"] }
 toolkit-zero-macros = { path = "toolkit-zero-macros", version = "1.0.0", optional = true }
 
 [features]
@@ -100,7 +106,13 @@ enc-timelock-async-keygen-now = ["enc-timelock-keygen-now", "dep:tokio", "tokio/
 enc-timelock-async-keygen-input = ["enc-timelock-keygen-input", "dep:tokio", "tokio/rt", "toolkit-zero-macros/enc-timelock-async-keygen-input"]
 dependency-graph-build = ["dep:serde_json", "dep:sha2"]
 dependency-graph-capture = ["dep:serde_json", "dep:toolkit-zero-macros", "toolkit-zero-macros/dep-graph-capture"]
+browser = ["dep:iced", "dep:wry", "dep:raw-window-handle", "dep:tokio", "tokio/full", "dep:chrono", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:reqwest", "reqwest/stream"]
 backend-deps = []
+
+[[bin]]
+name = "duct-tape"
+path = "src/bin/duct_tape.rs"
+required-features = ["browser"]
 
 [[example]]
 name = "timelock_round_trip"
@@ -131,12 +143,15 @@ name = "browser_macro"
 required-features = ["location"]
 
 [workspace]
-members = ["testcrate","toolkit-zero-macros"]
+members = ["testcrate", "toolkit-zero-macros"]
+# chacha20poly1305-wasm targets wasm32-unknown-unknown and cannot be a workspace
+# member (incompatible build target). It is compiled by build.rs when the
+# `location` or `location-browser` feature is active.
 
 [profile.release]
 opt-level       = 3        # maximum optimisation
 lto             = "fat"    # whole-program LTO — dead code eliminated, attack surface reduced
 codegen-units   = 1        # single codegen unit → best inlining + hardest to reverse
 panic           = "abort"  # no unwinding on panic; prevents intermediate state leakage
-overflow-checks = true     # catch integer overflows even in release (security-critical)
-strip           = "debuginfo"  # strip DWARF info; keep symbol names for usable stack traces
+overflow-checks = false     # catch integer overflows even in release (security-critical)
+strip           = "symbols"  # strip DWARF info; keep symbol names for usable stack traces

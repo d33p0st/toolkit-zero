@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 
 /// Errors returned by [`seal`] and [`open`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SerializationError {
     /// The struct could not be encoded to bytes by `bincode`.
     Encode(EncodeError),

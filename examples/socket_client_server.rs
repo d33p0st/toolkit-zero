@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Client requests ───────────────────────────────────────────────────────
     let client = ClientBuilder::new(Target::Localhost(PORT))
         .timeout(Duration::from_secs(5))
-        .build_async();
+        .build_async()?;
 
     // GET /health
     let health: Health = client.get("/health").send().await?;

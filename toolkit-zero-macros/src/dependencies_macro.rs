@@ -62,16 +62,14 @@ pub fn expand_dependencies(attr: TokenStream, item: TokenStream) -> TokenStream 
 
     let expanded: TokenStream2 = if args.bytes_mode {
         quote! {
-            const __TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__: &str =
-                include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
             let #binding: &'static [u8] =
-                __TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__.as_bytes();
+                include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json")).as_bytes();
         }
     } else {
         quote! {
-            const __TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__: &str =
-                include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"));
-            let #binding = #cap::parse(__TOOLKIT_ZERO_BUILD_TIME_FINGERPRINT__)?;
+            let #binding = #cap::parse(
+                include_str!(concat!(env!("OUT_DIR"), "/fingerprint.json"))
+            )?;
         }
     };
 

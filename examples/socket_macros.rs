@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = ClientBuilder::new(Target::Localhost(PORT))
         .timeout(Duration::from_secs(5))
-        .build_async();
+        .build_async()?;
 
     // Async GET /health — plain request, no body.
     #[request(client, GET, "/health", async)]
