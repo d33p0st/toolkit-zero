@@ -89,9 +89,37 @@ fn urlencode(s: &str) -> String {
 }
 
 // ── entry-point ───────────────────────────────────────────────────────────────
+//
+// No #[tokio::main] here.  iced's `tokio` feature starts its own multi-thread
+// Tokio runtime internally when `launch()` → `iced::application(...).run()` is
+// called.  Wrapping that in a second `#[tokio::main]` runtime was creating a
+// double-scheduler — the outer one spinning hot, the inner one doing all the real
+// work — hence the excessive heat.  `block_in_place` was only needed inside that
+// (now removed) outer async context; without it we just call `launch` directly.
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
+fn main() {
+    // ── Background daemonisation on Unix ─────────────────────────────────────
+    // When the binary is invoked with any arguments on Linux / macOS, re-exec
+    // itself as a detached background process so the terminal is freed
+    // immediately (equivalent to the user appending `&`).
+    #[cfg(unix)]
+    {
+        if std::env::var("DUCT_TAPE_BG").is_err() {
+            let cli_args: Vec<String> = std::env::args().skip(1).collect();
+            let exe = std::env::current_exe()
+                .unwrap_or_else(|_| PathBuf::from(std::env::args().next().unwrap()));
+            std::process::Command::new(&exe)
+                .args(&cli_args)
+                .env("DUCT_TAPE_BG", "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok();
+            std::process::exit(0);
+        }
+    }
+
     let mode = match parse_args() {
         Ok(m) => m,
         Err(e) => {
@@ -100,15 +128,11 @@ async fn main() {
         }
     };
 
-    // iced's EventLoop must run on the main thread; block_in_place keeps us on
-    // the main tokio thread while yielding the async scheduler for spawned tasks.
-    let result = tokio::task::block_in_place(|| match mode {
+    let result = match mode {
         LaunchMode::Default => launch_default(),
 
         LaunchMode::Url(raw) => {
-            // Resolve the input (add scheme, or fall back to search).
-            // Use UrlFromHome so the webview back-stack is seeded with the
-            // homepage — pressing Back from the opened URL returns home.
+            // Use UrlFromHome so Back from the opened URL returns to the homepage.
             launch(Target::UrlFromHome(resolve_url(&raw)))
         }
 
@@ -118,7 +142,7 @@ async fn main() {
         }
 
         LaunchMode::File(path) => launch(Target::File(path)),
-    });
+    };
 
     if let Err(e) = result {
         eprintln!("duct-tape: {e}");

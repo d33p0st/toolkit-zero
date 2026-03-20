@@ -64,6 +64,14 @@ pub fn spawn_download(id: u64, url: String, temp_dest: PathBuf, final_dest: Path
 // ── internals ─────────────────────────────────────────────────────────────────
 
 async fn run_download(id: u64, url: String, temp_dest: PathBuf, final_dest: PathBuf) {
+    // Only attempt HTTP/HTTPS downloads — blob:, data:, file: etc. cannot be
+    // fetched with reqwest and would fail with a confusing error.
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        eprintln!("[downloader] unsupported scheme, skipping: {url}");
+        push_progress(ProgressUpdate::Failed { id });
+        return;
+    }
+
     let client = match reqwest::Client::builder()
         .user_agent(concat!(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ",
@@ -71,6 +79,7 @@ async fn run_download(id: u64, url: String, temp_dest: PathBuf, final_dest: Path
             "Chrome/124.0 Safari/537.36"
         ))
         .redirect(reqwest::redirect::Policy::limited(20))
+        .connect_timeout(std::time::Duration::from_secs(15))
         .build()
     {
         Ok(c) => c,
@@ -91,14 +100,19 @@ async fn run_download(id: u64, url: String, temp_dest: PathBuf, final_dest: Path
     // HEAD request to check server capabilities.
     let (content_length, accepts_ranges) = match client.head(&url).send().await {
         Ok(resp) => {
-            let cl = resp.content_length();
-            let ar = resp
-                .headers()
-                .get("accept-ranges")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().eq_ignore_ascii_case("bytes"))
-                .unwrap_or(false);
-            (cl, ar)
+            // Treat non-success responses as "no range support, no length".
+            if !resp.status().is_success() {
+                (None, false)
+            } else {
+                let cl = resp.content_length();
+                let ar = resp
+                    .headers()
+                    .get("accept-ranges")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.trim().eq_ignore_ascii_case("bytes"))
+                    .unwrap_or(false);
+                (cl, ar)
+            }
         }
         Err(_) => (None, false),
     };
@@ -276,6 +290,15 @@ async fn streaming_download(
             return;
         }
     };
+
+    // Reject non-success responses (e.g. 403 Forbidden / 404 Not Found).
+    // Small files hit this path exclusively; without the check the error-page
+    // HTML body gets written to disk as the "downloaded" file.
+    if !resp.status().is_success() {
+        eprintln!("[downloader] HTTP {} for {url}", resp.status());
+        push_progress(ProgressUpdate::Failed { id });
+        return;
+    }
 
     // Re-derive total from the response Content-Length if we didn't have it.
     let total = total.or_else(|| {

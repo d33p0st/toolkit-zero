@@ -54,8 +54,10 @@ mod history;
 mod loader;
 mod quicklinks;
 mod settings;
+mod spatial;
 mod stash;
 mod tab;
+pub mod vault;
 mod webview;
 
 pub use quicklinks::{QuickLink, load as load_quicklinks};

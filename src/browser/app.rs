@@ -100,6 +100,76 @@ pub enum Message {
     DownloadFinished(u64),
     /// Download failed (id).
     DownloadFailed(u64),
+    // ── new UX features ──────────────────────────────────────────────────────
+    /// Close the currently-active tab (Cmd+W shortcut path).
+    CloseCurrentTab,
+    /// Focus and select-all in the address bar (Cmd+L).
+    FocusAddressBar,
+    /// Zoom into the current page (Cmd++ / Cmd+=).
+    ZoomIn,
+    /// Zoom out of the current page (Cmd+-).
+    ZoomOut,
+    /// Reset page zoom to 100 % (Cmd+0).
+    ZoomReset,
+    /// Toggle the find-in-page toolbar (Cmd+F).
+    ToggleFindBar,
+    /// The find-query string changed.
+    FindQueryChanged(String),
+    /// Jump to the next find match.
+    FindNext,
+    /// Jump to the previous find match.
+    FindPrev,
+    /// Close the find toolbar and clear the active highlight.
+    CloseFind,
+    /// Navigate to a URL chosen from the address-bar autocomplete list.
+    AutocompleteSelected(String),
+    /// Dismiss the autocomplete dropdown without navigating.
+    AutocompleteDismiss,
+    /// Web content entered fullscreen (Netflix, YouTube, etc.).
+    EnterFullscreen,
+    /// Web content exited fullscreen.
+    ExitFullscreen,
+    // ── tab group redesign ─────────────────────────────────────────────────────
+    /// Toggle collapsed/expanded state of a group in the tab panel.
+    ToggleCollapseGroup(u64),
+    /// Move the group with `group_id` to `new_index` in the groups Vec.
+    MoveGroupToIndex(u64, usize),
+    /// Move the tab at `from_idx` to `to_idx` (drag reorder) in the tabs Vec.
+    ReorderTab(usize, usize),
+    // ── Feature 10: smart auto-grouping ───────────────────────────────────────
+    /// Open a URL in a new tab, inheriting the group of the current active tab.
+    OpenInNewTab(String),
+    // ── Feature 4: tab suspension ─────────────────────────────────────────────
+    /// Suspend (hibernate) the background tab at `idx` to free resources.
+    SuspendTab(usize),
+    // ── Feature 7: screenshot ─────────────────────────────────────────────────
+    /// Trigger the interactive macOS screenshot picker and save to Desktop.
+    TakeScreenshot,
+    // ── Feature 5: spatial tab map ────────────────────────────────────────────
+    /// Toggle the force-directed spatial tab map overlay.
+    ToggleSpatialMap,
+    /// Drag a node in the spatial map — move tab `idx` by `(dx, dy)`.
+    SpatialMoveNode(usize, f32, f32),
+    /// Select a tab from the spatial map overlay.
+    SpatialTabSelected(usize),
+
+    // ── Credential vault ──────────────────────────────────────────────────────
+    /// Open the vault panel.
+    OpenVaultPanel,
+    /// Close the vault panel (vault remains unlocked in memory).
+    CloseVaultPanel,
+    /// User is typing the master password.
+    VaultPasswordChanged(String),
+    /// Unlock (or create) the vault with the current `vault_password_draft`.
+    VaultUnlock,
+    /// Lock the vault, clearing in-memory key and entries.
+    VaultLock,
+    /// Add or update an entry: (domain, username, password).
+    VaultUpsert(String, String, String),
+    /// Delete an entry: (domain, username).
+    VaultDelete(String, String),
+    /// Inject credentials for the current page's domain.
+    VaultFillPage,
 }
 
 /// Determines which visual theme the browser uses.
@@ -329,6 +399,39 @@ pub struct BrowserState {
     /// Receiver for programmatic API commands from [`super::api::BrowserHandle`].
     /// `None` when the browser was launched without an API handle.
     api_rx: Option<tokio::sync::mpsc::UnboundedReceiver<super::api::ApiMessage>>,
+    /// Current page zoom level.  1.0 = 100 %, range 0.3 – 3.0.
+    zoom_level: f32,
+    /// Whether the find-in-page toolbar is currently visible.
+    find_bar_open: bool,
+    /// The active text search query shown in the find toolbar.
+    find_query: String,
+    /// Whether the address-bar autocomplete dropdown is currently shown.
+    autocomplete_visible: bool,
+    /// Filtered history suggestions displayed in the autocomplete dropdown.
+    autocomplete_suggestions: Vec<history::HistoryEntry>,
+    /// All history entries kept in memory for instant autocomplete filtering.
+    /// Loaded once at startup and updated as new pages are visited.
+    history_cache: Vec<history::HistoryEntry>,
+    /// Whether the webview is currently in OS-level fullscreen mode.
+    /// When true the webview fills the entire window and the chrome is hidden.
+    content_fullscreen: bool,
+    /// Groups whose tab lists are currently collapsed in the panel.
+    collapsed_groups: std::collections::HashSet<u64>,
+    // ── Feature 5: spatial tab map ────────────────────────────────────────────
+    /// Whether the spatial tab map overlay is visible.
+    spatial_map_open: bool,
+    /// (x, y) canvas positions for each tab node — parallel to `tabs`.
+    /// Lazily initialised and updated by force-directed layout in `Tick`.
+    node_positions: Vec<(f32, f32)>,
+    // ── Credential vault ──────────────────────────────────────────────────────
+    /// Unlocked vault (None when locked or not yet opened).
+    vault: Option<super::vault::Vault>,
+    /// Whether the vault panel is visible.
+    vault_panel_open: bool,
+    /// Staging area for the master-password input field.
+    vault_password_draft: String,
+    /// Last vault status message shown to the user.
+    vault_status: String,
 }
 
 impl BrowserState {
@@ -382,6 +485,20 @@ impl BrowserState {
             recent_download_starts: std::collections::HashMap::new(),
             pending_url_after_home: None,
             api_rx: super::api::take_receiver(),
+            zoom_level: 1.0,
+            find_bar_open: false,
+            find_query: String::new(),
+            autocomplete_visible: false,
+            autocomplete_suggestions: Vec::new(),
+            history_cache: history::load_history(),
+            content_fullscreen: false,
+            collapsed_groups: std::collections::HashSet::new(),
+            spatial_map_open: false,
+            node_positions: Vec::new(),
+            vault: None,
+            vault_panel_open: false,
+            vault_password_draft: String::new(),
+            vault_status: String::new(),
         };
         (state, Task::none())
     }
@@ -389,8 +506,30 @@ impl BrowserState {
 
 pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
     match message {
-        Message::AddressChanged(s) => { state.address_input = s; Task::none() }
+        Message::AddressChanged(s) => {
+            state.address_input = s.clone();
+            if s.len() >= 2 {
+                let lower = s.to_lowercase();
+                state.autocomplete_suggestions = state.history_cache
+                    .iter()
+                    .rev() // most-recent-first
+                    .filter(|e| {
+                        e.url.to_lowercase().contains(&lower)
+                            || e.title.to_lowercase().contains(&lower)
+                    })
+                    .take(8)
+                    .cloned()
+                    .collect();
+                state.autocomplete_visible = !state.autocomplete_suggestions.is_empty();
+            } else {
+                state.autocomplete_visible = false;
+                state.autocomplete_suggestions.clear();
+            }
+            Task::none()
+        }
         Message::Navigate => {
+            state.autocomplete_visible = false;
+            state.autocomplete_suggestions.clear();
             let url = resolve_url(&state.address_input);
             navigate_current_tab(state, url);
             // Unfocus the address bar by focusing a nonexistent ID — the
@@ -450,7 +589,16 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        Message::TabsHovered(h) => { state.tabs_hovered = h; Task::none() }
+        Message::TabsHovered(h) => {
+            // Keep the panel expanded while a group rename is in progress so
+            // the user can hover into the input box without the panel collapsing.
+            if state.renaming_group.is_some() {
+                state.tabs_hovered = true;
+            } else {
+                state.tabs_hovered = h;
+            }
+            Task::none()
+        }
 
         Message::NewTab => {
             state.tabs.push(Tab::new_html(super::homepage_html_arc()));
@@ -485,8 +633,24 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::SelectTab(idx) => {
+            // Record when the previously active tab is backgrounded.
+            if let Some(prev) = state.tabs.get_mut(state.active_tab) {
+                if state.active_tab != idx {
+                    prev.last_active_time = Some(std::time::Instant::now());
+                }
+            }
             state.active_tab = idx;
             state.suppress_next_push = true;
+            // Clear background-timer for the newly selected tab.
+            if let Some(tab) = state.tabs.get_mut(idx) {
+                tab.last_active_time = None;
+            }
+            let suspended = state.tabs.get(idx).map(|t| t.suspended).unwrap_or(false);
+            if suspended {
+                if let Some(tab) = state.tabs.get_mut(idx) {
+                    tab.suspended = false;
+                }
+            }
             let (home_html, url) = {
                 let tab = &state.tabs[idx];
                 (tab.home_html.clone(), tab.url.clone())
@@ -536,9 +700,14 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
         }
         Message::WindowResized(_, new_size) => {
             state.window_size = new_size;
-            let right_w = right_panel_w(state);
-            let (x, y, w, h) = content_bounds(new_size, state.tab_panel_w, right_w);
-            webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            if state.content_fullscreen {
+                // While in fullscreen the webview covers the entire window.
+                webview::set_bounds(0.0, 0.0, new_size.width as f64, new_size.height as f64);
+            } else {
+                let right_w = right_panel_w(state);
+                let (x, y, w, h) = content_bounds(new_size, state.tab_panel_w, right_w);
+                webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            }
             Task::none()
         }
         Message::WebViewReady => {
@@ -600,10 +769,23 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
                     // the write is a single buffered syscall (< 1 ms).
                     if state.history_recording {
                         history::append_entry(&title, &url);
+                        // Keep the in-memory autocomplete cache in sync.
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let ts = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        state.history_cache.push(super::history::HistoryEntry {
+                            timestamp_ms: ts,
+                            title: title.clone(),
+                            url: url.clone(),
+                        });
                     }
                 }
                 state.suppress_next_push = false;
-                state.address_input = url;
+                state.address_input = url.clone();
+                // ── Feature 6: per-domain CSS injection ─────────────────────
+                inject_userstyle_for_url(&url);
             } else {
                 // about:blank or tkz: URL.
                 if let Some(url) = state.pending_url_after_home.take() {
@@ -666,6 +848,115 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
         }
 
         Message::IpcReceived(msg) => {
+            // Fast-path: fullscreen events are handled here without going
+            // through handle_ipc() so we can return a Task.
+            if msg.contains("\"enter_fullscreen\"") && !state.content_fullscreen {
+                return Task::done(Message::EnterFullscreen);
+            }
+            if msg.contains("\"exit_fullscreen\"") && state.content_fullscreen {
+                return Task::done(Message::ExitFullscreen);
+            }
+            // Blob/data-URL downloads forwarded from the in-page JS interceptor.
+            // The bytes are base64-encoded in JS (where the blob store is
+            // accessible) and written directly to ~/Downloads from here.
+            if msg.contains("\"blob_download\"") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&msg) {
+                    if let (Some(raw_name), Some(b64)) = (
+                        val["filename"].as_str(),
+                        val["data"].as_str(),
+                    ) {
+                        use base64::Engine;
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                            // Sanitize filename.
+                            let safe: String = raw_name.chars()
+                                .filter(|c| !matches!(c, '/' | '\\' | '\0'))
+                                .collect();
+                            let safe = if safe.trim().is_empty() { "download".to_string() } else { safe };
+
+                            let home = std::env::var("HOME").unwrap_or_default();
+                            let downloads = std::path::PathBuf::from(home).join("Downloads");
+                            let final_dest = unique_download_dest(&downloads.join(&safe), &state.downloads);
+
+                            let id = state.next_download_id;
+                            state.next_download_id += 1;
+                            let name = final_dest.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or(safe);
+                            let size = bytes.len() as u64;
+
+                            if let Ok(()) = std::fs::write(&final_dest, &bytes) {
+                                state.downloads.push(super::downloads::DownloadEntry {
+                                    id,
+                                    url: String::from("blob:"),
+                                    filename: name,
+                                    temp_dest: final_dest.clone(),
+                                    final_dest: final_dest.clone(),
+                                    bytes_downloaded: size,
+                                    total_bytes: Some(size),
+                                    speed_bps: 0,
+                                    status: super::downloads::DownloadStatus::Completed,
+                                });
+                                super::stash::save_stash(&state.downloads);
+                            }
+                        }
+                    }
+                }
+                return Task::none();
+            }
+            // Global keyboard shortcuts forwarded from the webview JS.
+            // The WKWebView captures all keyboard events when focused; this
+            // IPC bridge re-emits them as Messages so shortcuts work everywhere.
+            if msg.contains("\"shortcut\"") {
+                let action = {
+                    let needle = "\"action\":";
+                    msg.find(needle).and_then(|p| {
+                        let rest = msg[p + needle.len()..].trim_start();
+                        if rest.starts_with('"') {
+                            let inner = &rest[1..];
+                            inner.find('"').map(|e| inner[..e].to_string())
+                        } else { None }
+                    })
+                };
+                return match action.as_deref() {
+                    Some("new_tab")           => Task::done(Message::NewTab),
+                    Some("close_tab")         => Task::done(Message::CloseCurrentTab),
+                    Some("reload")            => Task::done(Message::Reload),
+                    Some("focus_address_bar") => Task::done(Message::FocusAddressBar),
+                    Some("back")              => Task::done(Message::Back),
+                    Some("forward")           => Task::done(Message::Forward),
+                    Some("zoom_in")           => Task::done(Message::ZoomIn),
+                    Some("zoom_out")          => Task::done(Message::ZoomOut),
+                    Some("zoom_reset")        => Task::done(Message::ZoomReset),
+                    Some("find")              => Task::done(Message::ToggleFindBar),
+                    Some("close_find")        => Task::done(Message::CloseFind),
+                    Some("screenshot")        => Task::done(Message::TakeScreenshot),
+                    Some("spatial_map")       => Task::done(Message::ToggleSpatialMap),
+                    Some("vault_fill")        => Task::done(Message::VaultFillPage),
+                    _ => Task::none(),
+                };
+            }
+            // Feature 10: context-menu "Open in New Tab".
+            if msg.contains("\"open_in_new_tab\"") {
+                // Extract the URL field with the hand-rolled parser already
+                // used by handle_ipc().
+                let get_url = || -> Option<String> {
+                    let needle = "\"url\":";
+                    let start = msg.find(needle)? + needle.len();
+                    let rest = msg[start..].trim_start();
+                    if rest.starts_with('"') {
+                        let inner = &rest[1..];
+                        let end = inner.find('"')?;
+                        Some(inner[..end].to_string())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(raw) = get_url() {
+                    let url = resolve_url(&raw);
+                    return Task::done(Message::OpenInNewTab(url));
+                }
+                return Task::none();
+            }
             handle_ipc(state, &msg);
             Task::none()
         }
@@ -925,6 +1216,339 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
                 }
                 state.group_rename_text.clear();
             }
+            // Release panel hover lock now that rename is done.
+            state.tabs_hovered = false;
+            Task::none()
+        }
+
+        // ── new UX features ────────────────────────────────────────────────
+
+        Message::CloseCurrentTab => {
+            // Route through the existing CloseTab handler so all cleanup logic
+            // (group prune, window close when last tab, etc.) fires correctly.
+            Task::done(Message::CloseTab(state.active_tab))
+        }
+
+        Message::FocusAddressBar => {
+            state.autocomplete_visible = false;
+            state.autocomplete_suggestions.clear();
+            iced::widget::operation::focus::<Message>(iced::widget::Id::new("addr_bar"))
+        }
+
+        Message::ZoomIn => {
+            state.zoom_level = (state.zoom_level + 0.1).min(3.0);
+            webview::set_zoom(state.zoom_level);
+            Task::none()
+        }
+        Message::ZoomOut => {
+            state.zoom_level = (state.zoom_level - 0.1).max(0.3);
+            webview::set_zoom(state.zoom_level);
+            Task::none()
+        }
+        Message::ZoomReset => {
+            state.zoom_level = 1.0;
+            webview::set_zoom(1.0);
+            Task::none()
+        }
+
+        Message::ToggleFindBar => {
+            state.find_bar_open = !state.find_bar_open;
+            if !state.find_bar_open {
+                state.find_query.clear();
+                webview::clear_find();
+                Task::none()
+            } else {
+                iced::widget::operation::focus::<Message>(iced::widget::Id::new("find_input"))
+            }
+        }
+        Message::FindQueryChanged(q) => {
+            state.find_query = q.clone();
+            if q.is_empty() {
+                webview::clear_find();
+            } else {
+                webview::find_text(&q, false);
+            }
+            Task::none()
+        }
+        Message::FindNext => {
+            if !state.find_query.is_empty() {
+                webview::find_text(&state.find_query, false);
+            }
+            Task::none()
+        }
+        Message::FindPrev => {
+            if !state.find_query.is_empty() {
+                webview::find_text(&state.find_query, true);
+            }
+            Task::none()
+        }
+        Message::CloseFind => {
+            state.find_bar_open = false;
+            state.find_query.clear();
+            webview::clear_find();
+            state.autocomplete_visible = false;
+            state.autocomplete_suggestions.clear();
+            // Escape also exits fullscreen (mirrors native browser behaviour).
+            if state.content_fullscreen {
+                return Task::done(Message::ExitFullscreen);
+            }
+            Task::none()
+        }
+
+        Message::AutocompleteSelected(raw_url) => {
+            let url = resolve_url(&raw_url);
+            state.address_input = url.clone();
+            state.autocomplete_visible = false;
+            state.autocomplete_suggestions.clear();
+            navigate_current_tab(state, url);
+            iced::widget::operation::focus::<Message>(iced::widget::Id::unique())
+        }
+        Message::AutocompleteDismiss => {
+            state.autocomplete_visible = false;
+            state.autocomplete_suggestions.clear();
+            Task::none()
+        }
+
+        Message::EnterFullscreen => {
+            state.content_fullscreen = true;
+            // Expand the webview to cover the entire window (hides iced chrome).
+            webview::set_bounds(
+                0.0, 0.0,
+                state.window_size.width as f64,
+                state.window_size.height as f64,
+            );
+            webview::set_fullscreen(true);
+            // Also put the OS window into true fullscreen mode.
+            if let Some(wid) = state.window_id {
+                window::set_mode(wid, window::Mode::Fullscreen)
+            } else {
+                Task::none()
+            }
+        }
+        Message::ExitFullscreen => {
+            state.content_fullscreen = false;
+            webview::set_fullscreen(false);
+            // Exit OS fullscreen first; bounds are corrected in the resize event
+            // that fires once the window returns to its previous size.
+            if let Some(wid) = state.window_id {
+                window::set_mode(wid, window::Mode::Windowed)
+            } else {
+                Task::none()
+            }
+        }
+
+        Message::ToggleCollapseGroup(gid) => {
+            if state.collapsed_groups.contains(&gid) {
+                state.collapsed_groups.remove(&gid);
+            } else {
+                state.collapsed_groups.insert(gid);
+            }
+            Task::none()
+        }
+        Message::MoveGroupToIndex(gid, new_idx) => {
+            if let Some(pos) = state.tab_groups.iter().position(|g| g.id == gid) {
+                let group = state.tab_groups.remove(pos);
+                let insert_at = new_idx.min(state.tab_groups.len());
+                state.tab_groups.insert(insert_at, group);
+            }
+            Task::none()
+        }
+        Message::ReorderTab(from_idx, to_idx) => {
+            if from_idx != to_idx && from_idx < state.tabs.len() && to_idx <= state.tabs.len() {
+                let tab = state.tabs.remove(from_idx);
+                let insert_at = if to_idx > from_idx { to_idx - 1 } else { to_idx };
+                state.tabs.insert(insert_at, tab);
+                // Keep active_tab pointing at the same tab.
+                if state.active_tab == from_idx {
+                    state.active_tab = insert_at;
+                } else if from_idx < state.active_tab && to_idx > state.active_tab {
+                    state.active_tab -= 1;
+                } else if from_idx > state.active_tab && to_idx <= state.active_tab {
+                    state.active_tab += 1;
+                }
+            }
+            Task::none()
+        }
+
+        // ── Feature 10: open in new tab with auto-grouping ─────────────────
+        Message::OpenInNewTab(url) => {
+            // Inherit the group of the tab that spawned this one.
+            let parent_group = state.tabs.get(state.active_tab).and_then(|t| t.group_id);
+            let parent_idx   = state.active_tab;
+            let mut new_tab  = Tab::new(url.clone());
+            new_tab.opened_from = Some(parent_idx);
+            new_tab.group_id    = parent_group;
+            state.tabs.push(new_tab);
+            let new_idx = state.tabs.len() - 1;
+            state.active_tab = new_idx;
+            state.address_input = url.clone();
+            state.suppress_next_push = false;
+            // Set last_active_time on the previous tab immediately.
+            if let Some(prev) = state.tabs.get_mut(parent_idx) {
+                prev.last_active_time = Some(std::time::Instant::now());
+            }
+            webview::navigate(&url);
+            Task::none()
+        }
+
+        // ── Feature 4: tab suspension ──────────────────────────────────────
+        Message::SuspendTab(idx) => {
+            if let Some(tab) = state.tabs.get_mut(idx) {
+                tab.suspended = true;
+            }
+            Task::none()
+        }
+
+        // ── Feature 7: screenshot ──────────────────────────────────────────
+        Message::TakeScreenshot => {
+            let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+            let home = std::env::var("HOME").unwrap_or_default();
+            let path = format!("{home}/Desktop/duct-tape-{ts}.png");
+            webview::take_screenshot(&path);
+            Task::none()
+        }
+
+        // ── Feature 5: spatial tab map ─────────────────────────────────────
+        Message::ToggleSpatialMap => {
+            state.spatial_map_open = !state.spatial_map_open;
+            if state.spatial_map_open {
+                // Initialise or resize the node_positions Vec to match tabs.
+                reinit_spatial_positions(state);
+                // The webview is a native OS window layer that always renders on
+                // top of iced canvases.  Collapse it to nothing so the spatial
+                // map overlay (an iced Canvas) is fully visible.
+                webview::set_bounds(0.0, 0.0, 0.0, 0.0);
+            } else {
+                // Restore the webview to its normal content area.
+                let right_w = right_panel_w(state);
+                let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+                webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            }
+            Task::none()
+        }
+        Message::SpatialMoveNode(idx, dx, dy) => {
+            if let Some(pos) = state.node_positions.get_mut(idx) {
+                pos.0 = (pos.0 + dx).clamp(
+                    super::tab::PANEL_COLLAPSED_W + super::tab::PANEL_EXPANDED_W + 40.0,
+                    state.window_size.width  - 40.0,
+                );
+                pos.1 = (pos.1 + dy).clamp(40.0, state.window_size.height - 40.0);
+            }
+            Task::none()
+        }
+        Message::SpatialTabSelected(idx) => {
+            // Close the map, restore the webview, and switch to the selected tab.
+            state.spatial_map_open = false;
+            let right_w = right_panel_w(state);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            if idx < state.tabs.len() {
+                return Task::done(Message::SelectTab(idx));
+            }
+            Task::none()
+        }
+
+        // ── Credential vault ──────────────────────────────────────────────────
+        Message::OpenVaultPanel => {
+            state.vault_panel_open = true;
+            state.show_history = false;
+            state.show_downloads = false;
+            let right_w = right_panel_w(state);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            Task::none()
+        }
+        Message::CloseVaultPanel => {
+            state.vault_panel_open = false;
+            state.vault_password_draft.clear();
+            let right_w = right_panel_w(state);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            Task::none()
+        }
+        Message::VaultPasswordChanged(s) => {
+            state.vault_password_draft = s;
+            Task::none()
+        }
+        Message::VaultUnlock => {
+            let master = std::mem::take(&mut state.vault_password_draft);
+            if master.is_empty() {
+                state.vault_status = "Enter a master password.".into();
+                return Task::none();
+            }
+            if super::vault::Vault::exists() {
+                match super::vault::Vault::open(&master) {
+                    Ok(v) => {
+                        state.vault = Some(v);
+                        state.vault_status = "Vault unlocked.".into();
+                    }
+                    Err(e) => {
+                        state.vault_status = format!("Could not unlock: {e}");
+                    }
+                }
+            } else {
+                match super::vault::Vault::create(&master) {
+                    Ok(v) => {
+                        state.vault = Some(v);
+                        state.vault_status = "New vault created and unlocked.".into();
+                    }
+                    Err(e) => {
+                        state.vault_status = format!("Could not create vault: {e}");
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::VaultLock => {
+            state.vault = None;
+            state.vault_status = "Vault locked.".into();
+            Task::none()
+        }
+        Message::VaultUpsert(domain, username, password) => {
+            if let Some(v) = &mut state.vault {
+                match v.upsert(domain, username, password) {
+                    Ok(())  => state.vault_status = "Credential saved.".into(),
+                    Err(e)  => state.vault_status = format!("Save failed: {e}"),
+                }
+            } else {
+                state.vault_status = "Unlock the vault first.".into();
+            }
+            Task::none()
+        }
+        Message::VaultDelete(domain, username) => {
+            if let Some(v) = &mut state.vault {
+                match v.remove(&domain, &username) {
+                    Ok(true)  => state.vault_status = "Credential deleted.".into(),
+                    Ok(false) => state.vault_status = "Entry not found.".into(),
+                    Err(e)    => state.vault_status = format!("Delete failed: {e}"),
+                }
+            }
+            Task::none()
+        }
+        Message::VaultFillPage => {
+            if let Some(v) = &state.vault {
+                let url = state.tabs.get(state.active_tab)
+                    .map(|t| t.url.as_str())
+                    .unwrap_or("");
+                let host = url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches("www.");
+                if let Some(js) = v.fill_js(host) {
+                    webview::eval_script(&js);
+                    state.vault_status = format!("Filled credentials for {host}.");
+                } else {
+                    state.vault_status = format!("No stored credentials for {host}.");
+                }
+            } else {
+                state.vault_status = "Vault is locked. Open the vault panel first.".into();
+            }
             Task::none()
         }
 
@@ -943,7 +1567,6 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
                     BrowserEvent::DownloadCompleted(u, ok) => Task::done(Message::DownloadCompleted(u, ok)),
                 })
                 .collect();
-
             // Drain progress updates from the parallel downloader.
             // Apply Progress directly to state so view() sees it this same frame
             // (going via Task::done() defers state mutation to the next cycle).
@@ -1031,6 +1654,85 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             if has_active_dl {
                 state.download_anim_phase =
                     (state.download_anim_phase + 0.04) % (2.0 * std::f32::consts::PI);
+            }
+
+            // ── Feature 4: background tab suspension ──────────────────────
+            // Check every non-active tab; after SUSPENSION_SECS of inactivity
+            // mark it suspended so it will reload on next select.
+            const SUSPENSION_SECS: u64 = 10 * 60; // 10 minutes
+            for (i, tab) in state.tabs.iter().enumerate() {
+                if i == state.active_tab || tab.suspended { continue; }
+                if let Some(t) = tab.last_active_time {
+                    if t.elapsed().as_secs() >= SUSPENSION_SECS {
+                        tasks.push(Task::done(Message::SuspendTab(i)));
+                    }
+                }
+            }
+
+            // ── Feature 5: force-directed spatial layout ──────────────────
+            if state.spatial_map_open {
+                if state.node_positions.len() != state.tabs.len() {
+                    reinit_spatial_positions(state);
+                }
+                let n = state.node_positions.len();
+                if n > 1 {
+                    let map_x0 = state.tab_panel_w + 40.0;
+                    let map_w  = (state.window_size.width  - map_x0 - 40.0).max(100.0);
+                    let map_h  = (state.window_size.height - 80.0).max(100.0);
+                    let cx = map_x0 + map_w / 2.0;
+                    let cy = 40.0 + map_h / 2.0;
+                    let mut forces = vec![(0.0_f32, 0.0_f32); n];
+                    // Repulsion between all pairs.
+                    for i in 0..n {
+                        for j in (i + 1)..n {
+                            let (x1, y1) = state.node_positions[i];
+                            let (x2, y2) = state.node_positions[j];
+                            let dx = x1 - x2;
+                            let dy = y1 - y2;
+                            let d2 = dx * dx + dy * dy + 1.0;
+                            let d  = d2.sqrt();
+                            let k  = 4_000.0 / d2;
+                            let fx = k * dx / d;
+                            let fy = k * dy / d;
+                            forces[i].0 += fx;
+                            forces[i].1 += fy;
+                            forces[j].0 -= fx;
+                            forces[j].1 -= fy;
+                        }
+                        // Centering gravity.
+                        let (x, y) = state.node_positions[i];
+                        forces[i].0 += (cx - x) * 0.006;
+                        forces[i].1 += (cy - y) * 0.006;
+                    }
+                    // Spring attraction for parent→child edges.
+                    for (i, tab) in state.tabs.iter().enumerate().take(n) {
+                        if let Some(p) = tab.opened_from {
+                            if p < n {
+                                let (x1, y1) = state.node_positions[i];
+                                let (x2, y2) = state.node_positions[p];
+                                let dx = x2 - x1;
+                                let dy = y2 - y1;
+                                let k  = 0.04;
+                                forces[i].0 += k * dx;
+                                forces[i].1 += k * dy;
+                                forces[p].0  -= k * dx;
+                                forces[p].1  -= k * dy;
+                            }
+                        }
+                    }
+                    // Apply forces (overdamped — no velocity accumulation).
+                    let x_min = map_x0 + 40.0;
+                    let x_max = state.window_size.width  - 40.0;
+                    let y_min = 60.0_f32;
+                    let y_max = state.window_size.height - 40.0;
+                    for i in 0..n {
+                        if state.node_positions.len() > i {
+                            let (ref mut x, ref mut y) = state.node_positions[i];
+                            *x = (*x + forces[i].0 * 0.016_f32).clamp(x_min, x_max);
+                            *y = (*y + forces[i].1 * 0.016_f32).clamp(y_min, y_max);
+                        }
+                    }
+                }
             }
 
             // ── API commands from BrowserHandle ───────────────────────────
@@ -1150,6 +1852,7 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
         .style(move |_theme, _status| nav_btn_style(dark));
 
     let url_input = TextInput::new("Search or enter URL", &state.address_input)
+        .id(iced::widget::Id::new("addr_bar"))
         .on_input(Message::AddressChanged)
         .on_submit(Message::Navigate)
         .padding(iced::Padding::from([5, 8]))
@@ -1157,7 +1860,50 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
         .width(Length::FillPortion(3))
         .style(move |_theme, status| url_bar_style(matches!(status, text_input::Status::Focused { .. }), dark));
 
+    // ── Security / TLS badge ──────────────────────────────────────────────────
     let icon_c = if dark { Color::from_rgb(0.52, 0.52, 0.62) } else { Color::from_rgb(0.35, 0.35, 0.46) };
+    let sec_badge: Element<Message> = {
+        let s = &state.address_input;
+        if s.starts_with("https://") || s.starts_with("file://") {
+            let c = if dark {
+                Color::from_rgb(0.30, 0.85, 0.45)
+            } else {
+                Color::from_rgb(0.12, 0.62, 0.28)
+            };
+            Text::new("🔒").size(11).color(c).into()
+        } else if s.starts_with("http://") {
+            Text::new("⚠").size(11)
+                .color(Color::from_rgb(0.88, 0.62, 0.10))
+                .into()
+        } else {
+            Space::new().width(Length::Fixed(0.0)).into()
+        }
+    };
+
+    // ── Zoom level chip (only shown when zoom != 100 %) ───────────────────────
+    let zoom_chip: Element<Message> = if (state.zoom_level - 1.0).abs() > 0.049 {
+        let pct = (state.zoom_level * 100.0).round() as i32;
+        Button::new(Text::new(format!("{pct}%")).size(10).color(icon_c))
+            .on_press(Message::ZoomReset)
+            .padding(iced::Padding::from([2, 5]))
+            .style(move |_theme, _status| button::Style {
+                background: Some(iced::Background::Color(
+                    if dark { Color::from_rgba(1.0, 1.0, 1.0, 0.07) }
+                    else    { Color::from_rgba(0.0, 0.0, 0.0, 0.07) }
+                )),
+                border: iced::Border {
+                    color: Color::from_rgba(0.467, 0.0, 1.0, 0.30),
+                    width: 0.75,
+                    radius: 4.0.into(),
+                },
+                shadow: iced::Shadow::default(),
+                text_color: icon_c,
+                snap: false,
+            })
+            .into()
+    } else {
+        Space::new().width(Length::Fixed(0.0)).into()
+    };
 
     let theme_icon = match state.theme_mode {
         ThemeMode::Light => "☀️",
@@ -1201,6 +1947,27 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
             text_color: Color::TRANSPARENT,
             snap: false,
         });
+    let vault_unlocked = state.vault.is_some();
+    let vault_icon_c = if vault_unlocked {
+        if dark { Color::from_rgba(0.40, 0.90, 0.55, 1.0) } else { Color::from_rgba(0.10, 0.65, 0.30, 1.0) }
+    } else {
+        if dark { Color::from_rgba(0.55, 0.55, 0.65, 0.80) } else { Color::from_rgba(0.38, 0.38, 0.50, 0.80) }
+    };
+    let vault_open_btn = Button::new(Text::new("🔐").size(13).color(vault_icon_c))
+        .on_press(if state.vault_panel_open { Message::CloseVaultPanel } else { Message::OpenVaultPanel })
+        .style(move |_theme, _status| nav_btn_style(dark));
+
+    let screenshot_btn = Button::new(
+        Text::new("⊡").size(16).color(nav_c),
+    )
+    .on_press(Message::TakeScreenshot)
+    .style(move |_theme, _status| nav_btn_style(dark));
+
+    let spatial_btn = Button::new(
+        Text::new("\u{2B21}").size(14).color(nav_c),
+    )
+    .on_press(Message::ToggleSpatialMap)
+    .style(move |_theme, _status| nav_btn_style(dark));
 
     let addr_bar = Container::new(
         Row::new()
@@ -1208,8 +1975,18 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
             .push(fwd_btn)
             .push(reload_btn)
             .push(Space::new().width(Length::Fixed(4.0)))
+            .push(sec_badge)
+            .push(Space::new().width(Length::Fixed(2.0)))
             .push(url_input)
+            .push(Space::new().width(Length::Fixed(3.0)))
+            .push(zoom_chip)
             .push(Space::new().width(Length::FillPortion(1)))
+            .push(screenshot_btn)
+            .push(Space::new().width(Length::Fixed(2.0)))
+            .push(spatial_btn)
+            .push(Space::new().width(Length::Fixed(2.0)))
+            .push(vault_open_btn)
+            .push(Space::new().width(Length::Fixed(2.0)))
             .push(theme_btn)
             .push(Space::new().width(Length::Fixed(2.0)))
             .push(dl_btn)
@@ -1235,6 +2012,7 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
         panel_w: state.tab_panel_w,
         groups: state.tab_groups.clone(),
         dark,
+        collapsed_groups: state.collapsed_groups.clone(),
     })
     .width(Length::Fixed(state.tab_panel_w))
     .height(Length::Fill)
@@ -1309,34 +2087,60 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
     let rename_layer: Element<Message> = if state.renaming_group.is_some() {
         Container::new(
             Column::new()
-                .push(Space::new().height(Length::Fill))
+                // ── input pinned just below the address bar ───────────────
+                .push(Space::new().height(Length::Fixed(CHROME_H + 6.0)))
                 .push(
                     Container::new(
-                        TextInput::new("Group name", &state.group_rename_text)
-                            .id(iced::widget::Id::new("group_rename"))
-                            .on_input(Message::GroupRenameChanged)
-                            .on_submit(Message::CommitGroupRename)
-                            .padding(iced::Padding::from([4, 8]))
-                            .size(13)
-                            .style(move |_theme, status| url_bar_style(
-                                matches!(status, text_input::Status::Focused { .. }), dark
-                            )),
+                        Column::new()
+                            .push(
+                                Text::new("Group name")
+                                    .size(11)
+                                    .color(if dark {
+                                        Color::from_rgb(0.55, 0.55, 0.65)
+                                    } else {
+                                        Color::from_rgb(0.40, 0.40, 0.50)
+                                    }),
+                            )
+                            .push(Space::new().height(Length::Fixed(4.0)))
+                            .push(
+                                TextInput::new("e.g. Work", &state.group_rename_text)
+                                    .id(iced::widget::Id::new("group_rename"))
+                                    .on_input(Message::GroupRenameChanged)
+                                    .on_submit(Message::CommitGroupRename)
+                                    .padding(iced::Padding::from([5, 8]))
+                                    .size(13)
+                                    .style(move |_theme, status| url_bar_style(
+                                        matches!(status, text_input::Status::Focused { .. }), dark
+                                    )),
+                            )
+                            .push(Space::new().height(Length::Fixed(4.0)))
+                            .push(
+                                Text::new("↵  confirm  · Esc  cancel")
+                                    .size(10)
+                                    .color(if dark {
+                                        Color::from_rgb(0.38, 0.38, 0.48)
+                                    } else {
+                                        Color::from_rgb(0.52, 0.52, 0.60)
+                                    }),
+                            )
+                            .spacing(0),
                     )
-                    .width(Length::Fixed(180.0))
-                    .padding(iced::Padding::from([4, 8]))
+                    .width(Length::Fixed((state.tab_panel_w - 8.0).max(170.0)))
+                    .padding(iced::Padding::from([8, 10]))
                     .style(move |_| container::Style {
                         background: Some(iced::Background::Color(popup_bg)),
                         border: iced::Border {
                             color: Color::from_rgba(0.467, 0.0, 1.0, 0.4),
                             width: 1.0,
-                            radius: 6.0.into(),
+                            radius: 8.0.into(),
                         },
                         ..Default::default()
                     }),
                 )
-                .push(Space::new().height(Length::Fixed(8.0)))
+                .push(Space::new().height(Length::Fill))
                 .width(Length::Fixed(state.tab_panel_w.max(180.0)))
-                .height(Length::Fill),
+                .height(Length::Fill)
+                .padding(iced::Padding::from([0, 4])),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1345,12 +2149,92 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
         Space::new().width(Length::Fill).height(Length::Fill).into()
     };
 
+    // ── Downloads panel (right edge, below address bar) ──────────────────────
     let downloads_layer: Element<Message> = if state.show_downloads {
         let panel_h = (state.window_size.height - ADDR_BAR_H).max(200.0);
         Container::new(
             Column::new()
                 .push(Space::new().height(Length::Fixed(ADDR_BAR_H)))
-                .push(downloads_panel(&state.downloads, panel_h, dark, state.download_anim_phase)),
+                .push(downloads_panel(
+                    &state.downloads,
+                    panel_h,
+                    dark,
+                    state.download_anim_phase,
+                )),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Right)
+        .into()
+    } else {
+        Space::new().width(Length::Fill).height(Length::Fill).into()
+    };
+
+    // ── Find-in-page toolbar (bottom of window) ───────────────────────────────
+    let find_bar_layer: Element<Message> = if state.find_bar_open {
+        Container::new(
+            Column::new()
+                .push(Space::new().height(Length::Fill))
+                .push(find_bar_widget(&state.find_query, dark)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        Space::new().width(Length::Fill).height(Length::Fill).into()
+    };
+
+    // ── URL autocomplete dropdown (below address bar) ──────────────────────────
+    let autocomplete_layer: Element<Message> =
+        if state.autocomplete_visible && !state.autocomplete_suggestions.is_empty() {
+            Container::new(
+                Column::new()
+                    .push(Space::new().height(Length::Fixed(CHROME_H)))
+                    .push(autocomplete_dropdown(&state.autocomplete_suggestions, dark)),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                left: state.tab_panel_w + INSET,
+                right: INSET,
+                top: 0.0,
+                bottom: 0.0,
+            })
+            .into()
+        } else {
+            Space::new().width(Length::Fill).height(Length::Fill).into()
+        };
+
+    // ── Feature 5: spatial tab map overlay ──────────────────────────────────
+    let spatial_layer: Element<Message> = if state.spatial_map_open {
+        let map = super::spatial::SpatialTabMap {
+            tabs:           &state.tabs,
+            groups:         &state.tab_groups,
+            node_positions: &state.node_positions,
+            active:         state.active_tab,
+            dark,
+        };
+        iced::widget::Canvas::new(map)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else {
+        Space::new().width(Length::Fill).height(Length::Fill).into()
+    };
+
+    // ── Credential vault panel ─────────────────────────────────────────────
+    let vault_layer: Element<Message> = if state.vault_panel_open {
+        let panel_h = (state.window_size.height - ADDR_BAR_H).max(200.0);
+        Container::new(
+            Column::new()
+                .push(Space::new().height(Length::Fixed(ADDR_BAR_H)))
+                .push(vault_panel(
+                    state.vault.as_ref(),
+                    &state.vault_password_draft,
+                    &state.vault_status,
+                    panel_h,
+                    dark,
+                )),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1365,7 +2249,11 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
         .push(loader_canvas)
         .push(hist_layer)
         .push(downloads_layer)
+        .push(vault_layer)
         .push(rename_layer)
+        .push(find_bar_layer)
+        .push(autocomplete_layer)
+        .push(spatial_layer)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -1396,6 +2284,41 @@ pub fn subscription(state: &BrowserState) -> Subscription<Message> {
     Subscription::batch([
         window_subs,
         time::every(tick_rate).map(Message::Tick),
+        // ── Global keyboard shortcuts ────────────────────────────────────
+        iced::event::listen_with(|event, _status, _window| {
+            let iced::Event::Keyboard(
+                iced::keyboard::Event::KeyPressed { ref key, modifiers, .. }
+            ) = event else {
+                return None;
+            };
+            let cmd   = modifiers.command();
+            let shift = modifiers.shift();
+            match key {
+                iced::keyboard::Key::Character(c) if cmd => match c.as_str() {
+                    "t" => Some(Message::NewTab),
+                    "w" => Some(Message::CloseCurrentTab),
+                    "r" => Some(Message::Reload),
+                    "l" => Some(Message::FocusAddressBar),
+                    "[" => Some(Message::Back),
+                    "]" => Some(Message::Forward),
+                    "-" => Some(Message::ZoomOut),
+                    "=" | "+" => Some(Message::ZoomIn),
+                    "0" => Some(Message::ZoomReset),
+                    "f" => Some(Message::ToggleFindBar),
+                    "s" if shift => Some(Message::TakeScreenshot),
+                    "m" if shift => Some(Message::ToggleSpatialMap),
+                    "v" if shift => Some(Message::VaultFillPage),
+                    _ => None,
+                },
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => {
+                    Some(Message::CloseFind)
+                }
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::F5) => {
+                    Some(Message::Reload)
+                }
+                _ => None,
+            }
+        }),
     ])
 }
 
@@ -1411,20 +2334,296 @@ pub fn content_bounds(window_size: Size, tab_panel_w: f32, history_w: f32) -> (f
     (x, y, w, h)
 }
 
+// ── autocomplete dropdown ─────────────────────────────────────────────────────
+
+fn autocomplete_dropdown(
+    suggestions: &[history::HistoryEntry],
+    dark: bool,
+) -> Element<'_, Message> {
+    let bg = if dark {
+        Color::from_rgba(0.07, 0.07, 0.11, 0.97)
+    } else {
+        Color::from_rgba(0.97, 0.97, 0.99, 0.97)
+    };
+    let text_c = if dark { Color::from_rgb(0.88, 0.88, 0.95) } else { Color::from_rgb(0.10, 0.10, 0.18) };
+    let sub_c  = if dark { Color::from_rgb(0.42, 0.42, 0.52) } else { Color::from_rgb(0.38, 0.38, 0.50) };
+
+    let mut col = Column::new().spacing(0).width(Length::Fill);
+    for entry in suggestions {
+        let url     = entry.url.clone();
+        let display = if entry.title.is_empty() { entry.url.clone() } else { entry.title.clone() };
+        let short   = short_url_display(&entry.url);
+        let item: Element<Message> = Button::new(
+            Column::new()
+                .push(Text::new(display).size(12).color(text_c))
+                .push(Text::new(short).size(10).color(sub_c))
+                .spacing(1),
+        )
+        .on_press(Message::AutocompleteSelected(url))
+        .width(Length::Fill)
+        .padding(iced::Padding::from([6, 10]))
+        .style(move |_theme, status| {
+            let hov = matches!(status, button::Status::Hovered);
+            button::Style {
+                background: if hov {
+                    Some(iced::Background::Color(if dark {
+                        Color::from_rgba(0.467, 0.0, 1.0, 0.14)
+                    } else {
+                        Color::from_rgba(0.467, 0.0, 1.0, 0.07)
+                    }))
+                } else {
+                    None
+                },
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                text_color: text_c,
+                snap: false,
+            }
+        })
+        .into();
+        col = col.push(item);
+    }
+
+    Container::new(col)
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(bg)),
+            border: iced::Border {
+                color: Color::from_rgba(0.467, 0.0, 1.0, if dark { 0.22 } else { 0.28 }),
+                width: 1.0,
+                radius: iced::border::Radius {
+                    top_left: 0.0,
+                    top_right: 0.0,
+                    bottom_left: 6.0,
+                    bottom_right: 6.0,
+                },
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, if dark { 0.55 } else { 0.18 }),
+                offset: iced::Vector::new(0.0, 5.0),
+                blur_radius: 14.0,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+// ── find-in-page toolbar ──────────────────────────────────────────────────────
+
+fn find_bar_widget(query: &str, dark: bool) -> Element<'_, Message> {
+    let bg = if dark {
+        Color::from_rgba(0.07, 0.07, 0.11, 0.97)
+    } else {
+        Color::from_rgba(0.96, 0.96, 0.98, 0.97)
+    };
+    let lbl_c = if dark { Color::from_rgb(0.50, 0.50, 0.60) } else { Color::from_rgb(0.40, 0.40, 0.50) };
+    let icon_c = if dark { Color::from_rgb(0.72, 0.72, 0.80) } else { Color::from_rgb(0.22, 0.22, 0.32) };
+
+    let input = TextInput::new("Find in page\u{2026}", query)
+        .id(iced::widget::Id::new("find_input"))
+        .on_input(Message::FindQueryChanged)
+        .on_submit(Message::FindNext)
+        .size(13)
+        .padding(iced::Padding::from([4, 8]))
+        .width(Length::Fixed(240.0))
+        .style(move |_theme, status| url_bar_style(
+            matches!(status, text_input::Status::Focused { .. }), dark
+        ));
+
+    let prev_btn = Button::new(Text::new("↑").size(13).color(icon_c))
+        .on_press(Message::FindPrev)
+        .style(move |_theme, _status| nav_btn_style(dark));
+
+    let next_btn = Button::new(Text::new("↓").size(13).color(icon_c))
+        .on_press(Message::FindNext)
+        .style(move |_theme, _status| nav_btn_style(dark));
+
+    let close_btn = Button::new(Text::new("✕").size(12).color(lbl_c))
+        .on_press(Message::CloseFind)
+        .style(move |_theme, _status| nav_btn_style(dark));
+
+    Container::new(
+        Row::new()
+            .push(Text::new("Find:").size(11).color(lbl_c))
+            .push(Space::new().width(Length::Fixed(6.0)))
+            .push(input)
+            .push(Space::new().width(Length::Fixed(2.0)))
+            .push(prev_btn)
+            .push(next_btn)
+            .push(Space::new().width(Length::Fill))
+            .push(close_btn)
+            .push(Space::new().width(Length::Fixed(6.0)))
+            .align_y(alignment::Vertical::Center),
+    )
+    .width(Length::Fill)
+    .padding(iced::Padding::from([5, 10]))
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(bg)),
+        border: iced::Border {
+            color: Color::from_rgba(0.467, 0.0, 1.0, if dark { 0.20 } else { 0.25 }),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+// ── URL helpers ───────────────────────────────────────────────────────────────
+
 fn resolve_url(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
         || trimmed.starts_with("file://")
     {
-        trimmed.to_string()
+        clean_url(trimmed)
     } else if trimmed.contains('.') && !trimmed.contains(' ') {
-        format!("https://{trimmed}")
+        clean_url(&format!("https://{trimmed}"))
     } else {
         format!(
             "https://www.google.com/search?q={}",
             urlencoding::encode(trimmed)
         )
+    }
+}
+
+/// Strip common tracking parameters and redirect AMP URLs to canonical form.
+///
+/// Tracking params removed: utm_*, fbclid, gclid, mc_cid, mc_eid, _ga, ref,
+/// igshid, twclid, msclkid, dclid, zanpid, otm_*, epik, and others.
+fn clean_url(url: &str) -> String {
+    // AMP redirect: amp.example.com → example.com + strip /amp suffix.
+    let url = if let Some(no_scheme) = url
+        .strip_prefix("https://amp.")
+        .or_else(|| url.strip_prefix("http://amp."))
+    {
+        let base = format!("https://{no_scheme}");
+        // Strip trailing /amp or /amp/ path component.
+        if let Some(p) = base.strip_suffix("/amp/").or_else(|| base.strip_suffix("/amp")) {
+            p.to_string()
+        } else {
+            base
+        }
+    } else {
+        // Strip /amp or /amp/ suffix from the path of any URL.
+        if let Some(p) = url.strip_suffix("/amp/").or_else(|| url.strip_suffix("/amp")) {
+            p.to_string()
+        } else {
+            url.to_string()
+        }
+    };
+
+    const STRIP_PARAMS: &[&str] = &[
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "utm_id", "utm_reader", "utm_referrer", "utm_name", "utm_social",
+        "utm_social-type",
+        "fbclid", "gclid", "dclid", "gbraid", "wbraid",
+        "mc_cid", "mc_eid",
+        "_ga", "_gl",
+        "igshid",
+        "twclid",
+        "msclkid",
+        "zanpid",
+        "epik",
+        "otm_campaign", "otm_content", "otm_medium", "otm_source", "otm_subtype",
+        "ref", "source",
+    ];
+
+    // Only parse if the URL has a query string.
+    let qmark = match url.find('?') {
+        Some(i) => i,
+        None    => return url,
+    };
+
+    let (before_query, query_and_fragment) = url.split_at(qmark);
+    // query_and_fragment starts with '?'
+    let (query_part, fragment) = if let Some(h) = query_and_fragment.find('#') {
+        (&query_and_fragment[1..h], &query_and_fragment[h..])
+    } else {
+        (&query_and_fragment[1..], "")
+    };
+
+    let kept: Vec<&str> = query_part
+        .split('&')
+        .filter(|pair| {
+            let key = pair.split('=').next().unwrap_or("");
+            // Case-insensitive match for any of the stripped prefixes/names.
+            let lower = key.to_lowercase();
+            !STRIP_PARAMS.iter().any(|s| lower == *s)
+                && !lower.starts_with("utm_")
+        })
+        .collect();
+
+    if kept.is_empty() {
+        format!("{before_query}{fragment}")
+    } else {
+        format!("{before_query}?{}{fragment}", kept.join("&"))
+    }
+}
+
+// ── Feature 6 helper ──────────────────────────────────────────────────────────
+
+/// Read `~/.config/duct-tape/userstyles/<host>.css` (if it exists) and inject
+/// it into the active page.
+fn inject_userstyle_for_url(url: &str) {
+    // Extract hostname (skip scheme, strip port).
+    let stripped = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = stripped
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("www.");
+    if host.is_empty() {
+        return;
+    }
+    let config = dirs_config().join("duct-tape/userstyles").join(format!("{host}.css"));
+    if let Ok(css) = std::fs::read_to_string(config) {
+        webview::inject_userstyle(&css);
+    }
+}
+
+/// Returns the platform config directory (e.g. `~/.config` on Linux/macOS).
+fn dirs_config() -> std::path::PathBuf {
+    // Honour XDG_CONFIG_HOME, fall back to ~/.config.
+    if let Ok(p) = std::env::var("XDG_CONFIG_HOME") {
+        return std::path::PathBuf::from(p);
+    }
+    if let Ok(h) = std::env::var("HOME") {
+        return std::path::PathBuf::from(h).join(".config");
+    }
+    std::path::PathBuf::from(".")
+}
+
+// ── Feature 5 helper ──────────────────────────────────────────────────────────
+
+/// (Re)initialise `state.node_positions` with a random-ish scatter across the
+/// canvas area so the force-directed layout has a good starting point.
+fn reinit_spatial_positions(state: &mut BrowserState) {
+    let n = state.tabs.len();
+    let map_x0 = state.tab_panel_w + 40.0;
+    let map_w  = (state.window_size.width  - map_x0 - 40.0).max(200.0);
+    let map_h  = (state.window_size.height - 80.0).max(200.0);
+
+    state.node_positions.resize(n, (0.0, 0.0));
+    // Place nodes in a rough grid pattern as starting positions.
+    let cols = ((n as f32).sqrt().ceil() as usize).max(1);
+    for (i, pos) in state.node_positions.iter_mut().enumerate() {
+        let col = (i % cols) as f32;
+        let row = (i / cols) as f32;
+        let rows = ((n as f32 / cols as f32).ceil()).max(1.0);
+        // Spread evenly with some padding.
+        let x = map_x0 + map_w * (col + 0.5) / cols as f32;
+        let y = 60.0 + map_h * (row + 0.5) / rows;
+        // Only overwrite uninitialized (zero) entries.
+        if pos.0 == 0.0 && pos.1 == 0.0 {
+            *pos = (x, y);
+        }
     }
 }
 
@@ -1940,11 +3139,146 @@ fn downloads_panel(
     .into()
 }
 
+// ── vault panel ───────────────────────────────────────────────────────────────
+
+fn vault_panel<'a>(
+    vault: Option<&'a super::vault::Vault>,
+    password_draft: &'a str,
+    status: &'a str,
+    panel_h: f32,
+    dark: bool,
+) -> Element<'a, Message> {
+    let panel_bg = if dark { Color::from_rgba(0.07, 0.07, 0.10, 0.97) } else { Color::from_rgba(0.95, 0.95, 0.97, 0.97) };
+    let text_c   = if dark { Color::from_rgb(0.85, 0.85, 0.92) } else { Color::from_rgb(0.12, 0.12, 0.20) };
+    let sub_c    = if dark { Color::from_rgb(0.42, 0.42, 0.52) } else { Color::from_rgb(0.38, 0.38, 0.50) };
+    let accent   = if dark { Color::from_rgba(0.467, 0.0, 1.0, 0.80) } else { Color::from_rgba(0.30, 0.0, 0.85, 0.90) };
+
+    let close_btn = Button::new(Text::new("\u{2715}").size(13).color(sub_c))
+        .on_press(Message::CloseVaultPanel)
+        .style(move |_t, _s| button::Style { background: None, ..Default::default() });
+
+    let header = Row::new()
+        .push(Text::new("\u{1f510}  Vault").size(13).color(text_c))
+        .push(Space::new().width(Length::Fill))
+        .push(close_btn)
+        .align_y(alignment::Vertical::Center);
+
+    let mut col = Column::new().spacing(8).padding(iced::Padding::from([10, 12]));
+    col = col.push(header);
+
+    if vault.is_none() {
+        // ── Locked: show password input ─────────────────────────────────────
+        col = col.push(
+            TextInput::new("Master password\u{2026}", password_draft)
+                .id(iced::widget::Id::new("vault_pw"))
+                .on_input(Message::VaultPasswordChanged)
+                .on_submit(Message::VaultUnlock)
+                .secure(true)
+                .padding(iced::Padding::from([5, 8]))
+                .size(13)
+                .style(move |_t, status| url_bar_style(matches!(status, text_input::Status::Focused { .. }), dark)),
+        );
+        col = col.push(
+            Button::new(Text::new("Unlock / Create").size(12).color(Color::WHITE))
+                .on_press(Message::VaultUnlock)
+                .width(Length::Fill)
+                .padding(iced::Padding::from([6, 10]))
+                .style(move |_t, _s| button::Style {
+                    background: Some(iced::Background::Color(accent)),
+                    border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                    text_color: Color::WHITE,
+                    ..Default::default()
+                }),
+        );
+    } else {
+        // ── Unlocked: prominent Fill button + credentials list ───────────────
+        col = col.push(
+            Button::new(
+                Text::new("\u{2328}  Fill credentials on this page").size(12).color(Color::WHITE),
+            )
+            .on_press(Message::VaultFillPage)
+            .width(Length::Fill)
+            .padding(iced::Padding::from([7, 10]))
+            .style(move |_t, _s| button::Style {
+                background: Some(iced::Background::Color(accent)),
+                border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                text_color: Color::WHITE,
+                ..Default::default()
+            }),
+        );
+
+        if let Some(v) = vault {
+            let entries = v.all();
+            if entries.is_empty() {
+                col = col.push(Text::new("No saved credentials.").size(11).color(sub_c));
+            } else {
+                for entry in entries {
+                    let d = entry.domain.clone();
+                    let u = entry.username.clone();
+                    let entry_row: Element<Message> = Row::new()
+                        .push(
+                            Column::new()
+                                .push(Text::new(entry.domain.as_str()).size(12).color(text_c))
+                                .push(Text::new(entry.username.as_str()).size(10).color(sub_c))
+                                .spacing(1)
+                                .width(Length::Fill),
+                        )
+                        .push(
+                            Button::new(Text::new("del").size(10).color(sub_c))
+                                .on_press(Message::VaultDelete(d, u))
+                                .padding(iced::Padding::from([2, 5]))
+                                .style(move |_t, _s| button::Style {
+                                    background: None,
+                                    border: iced::Border {
+                                        color: Color::from_rgba(0.5, 0.0, 0.0, 0.5),
+                                        width: 1.0,
+                                        radius: 4.0.into(),
+                                    },
+                                    ..Default::default()
+                                }),
+                        )
+                        .align_y(alignment::Vertical::Center)
+                        .into();
+                    col = col.push(entry_row);
+                }
+            }
+        }
+
+        col = col.push(Space::new().height(Length::Fixed(4.0)));
+        col = col.push(
+            Button::new(Text::new("Lock vault").size(11).color(sub_c))
+                .on_press(Message::VaultLock)
+                .style(move |_t, _s| button::Style { background: None, ..Default::default() }),
+        );
+    }
+
+    if !status.is_empty() {
+        col = col.push(Text::new(status).size(10).color(sub_c));
+    }
+
+    Container::new(
+        Scrollable::new(col).height(Length::Fixed(panel_h)),
+    )
+    .width(Length::Fixed(280.0))
+    .height(Length::Fixed(panel_h))
+    .style(move |_| container::Style {
+        background: Some(iced::Background::Color(panel_bg)),
+        border: iced::Border {
+            color: Color::from_rgba(0.467, 0.0, 1.0, if dark { 0.22 } else { 0.30 }),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        ..Default::default()
+    })
+    .into()
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 /// Width of whichever right-side panel is currently open (0 if none).
 fn right_panel_w(state: &BrowserState) -> f32 {
-    if state.show_history || state.show_downloads { 280.0 } else { 0.0 }
+    if state.show_history || state.show_downloads || state.vault_panel_open { 280.0 } else { 0.0 }
 }
 
 /// Open `path` with the system default application.
@@ -2025,7 +3359,7 @@ fn unique_download_dest(
     base: &std::path::Path,
     downloads: &[super::downloads::DownloadEntry],
 ) -> std::path::PathBuf {
-    let conflicts = |p: &std::path::Path| -> bool {
+    let conflicts = |p: &std::path::Path| {
         downloads.iter().any(|d| d.final_dest == p || d.temp_dest == p)
             || p.exists()
     };
@@ -2191,6 +3525,12 @@ fn handle_ipc(state: &BrowserState, msg: &str) {
                 inject_quicklinks_from(&reordered);
             }
         }
+        "enter_fullscreen" => {
+            // Dispatched by FULLSCREEN_INIT_SCRIPT when a page requests
+            // fullscreen (e.g. Netflix, YouTube full-screen button).
+            // We handle it in the next update cycle via Task::done.
+        }
+        "exit_fullscreen" => {}
         _ => {}
     }
 }

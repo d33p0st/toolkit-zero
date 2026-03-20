@@ -2,7 +2,7 @@
 name = "toolkit-zero"
 version = "5.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 build = "build.rs"
 authors = ["Soumyo Deep Gupta <deep.main.ac@gmail.com>"]
 description = "A feature-selective Rust utility crate — a modular collection of opt-in utilities spanning encryption, HTTP networking, geolocation, and build-time fingerprinting. Enable only the features your project requires."
@@ -53,7 +53,7 @@ tokio   = { version = "1", features = ["full"], optional = true }
 webbrowser = { version = "0.8", optional = true }
 zeroize = { version = "1", optional = true, features = ["derive"] }
 iced = { version = "0.14", optional = true, features = ["canvas", "tokio", "image"] }
-wry = { version = "0.54", optional = true }
+wry = { version = "0.54", features = ["fullscreen"], optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSImage"] }
@@ -106,7 +106,12 @@ enc-timelock-async-keygen-now = ["enc-timelock-keygen-now", "dep:tokio", "tokio/
 enc-timelock-async-keygen-input = ["enc-timelock-keygen-input", "dep:tokio", "tokio/rt", "toolkit-zero-macros/enc-timelock-async-keygen-input"]
 dependency-graph-build = ["dep:serde_json", "dep:sha2"]
 dependency-graph-capture = ["dep:serde_json", "dep:toolkit-zero-macros", "toolkit-zero-macros/dep-graph-capture"]
-browser = ["dep:iced", "dep:wry", "dep:raw-window-handle", "dep:tokio", "tokio/full", "dep:chrono", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:reqwest", "reqwest/stream"]
+browser = ["dep:iced", "dep:wry", "dep:raw-window-handle", "dep:tokio", "tokio/full",
+    "dep:chrono", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation",
+    "dep:reqwest", "reqwest/stream",
+    "dep:argon2", "dep:chacha20poly1305", "dep:rand",
+    "dep:base64", "dep:serde", "serde/derive", "dep:serde_json", "dep:zeroize"]
+signatures = ["dep:sha2"]
 backend-deps = []
 
 [[bin]]

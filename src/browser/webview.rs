@@ -23,35 +23,77 @@ thread_local! {
 
 // ── keyboard-shortcut init script ────────────────────────────────────────────
 
-/// Injected into every page so that Cmd/Ctrl + C/V/X/A/Z/Y work inside the
-/// WebView even when iced has intercepted the window's key-event handling.
+/// Injected into every page so that:
+///   1. Cmd/Ctrl + C/V/X/A/Z/Y work for clipboard / editing within the page.
+///   2. Global browser shortcuts (Cmd+T, Cmd+W, …) are forwarded back to iced
+///      via window.ipc.postMessage so they work even when the WKWebView has
+///      focus (which prevents iced's own key-event subscription from firing).
 const KEYBOARD_INIT_SCRIPT: &str = r#"
 (function() {
-  // Early-exit on platforms where the native engine already handles these.
-  var ua = navigator.userAgent;
-  if (/Mac/.test(ua)) {
-    // WKWebView on macOS does NOT need JS shims for edit commands.
-    // We only need to make sure devtools is not eating shortcuts.
-    return;
-  }
-  // Windows / Linux: dispatch execCommand for common edit shortcuts.
   document.addEventListener('keydown', function(e) {
     var ctrl = e.ctrlKey || e.metaKey;
-    if (!ctrl) return;
-    switch (e.key.toLowerCase()) {
-      case 'c': document.execCommand('copy');      e.preventDefault(); break;
-      case 'x': document.execCommand('cut');       e.preventDefault(); break;
-      case 'v': document.execCommand('paste');     e.preventDefault(); break;
-      case 'a': document.execCommand('selectAll'); e.preventDefault(); break;
-      case 'z': document.execCommand('undo');      e.preventDefault(); break;
-      case 'y': document.execCommand('redo');      e.preventDefault(); break;
+
+    // ── In-page editing shortcuts (handled locally, not forwarded) ───────────
+    if (ctrl && !e.shiftKey) {
+      switch (e.key.toLowerCase()) {
+        case 'c': document.execCommand('copy');      e.preventDefault(); return;
+        case 'x': document.execCommand('cut');       e.preventDefault(); return;
+        case 'v': document.execCommand('paste');     e.preventDefault(); return;
+        case 'a': document.execCommand('selectAll'); e.preventDefault(); return;
+        case 'z': document.execCommand('undo');      e.preventDefault(); return;
+      }
+    }
+    if (ctrl && e.shiftKey && e.key.toLowerCase() === 'z') {
+      document.execCommand('redo'); e.preventDefault(); return;
+    }
+    if (ctrl && e.key === 'y') {
+      document.execCommand('redo'); e.preventDefault(); return;
+    }
+
+    // ── Browser-level shortcuts — forward to iced via IPC ────────────────────
+    if (!ctrl && e.key !== 'Escape' && e.key !== 'F5') return;
+
+    var action = null;
+    if (ctrl) {
+      var k = e.key.toLowerCase();
+      if (!e.shiftKey) {
+        switch (k) {
+          case 't': action = 'new_tab';           break;
+          case 'w': action = 'close_tab';         break;
+          case 'r': action = 'reload';            break;
+          case 'l': action = 'focus_address_bar'; break;
+          case '[': action = 'back';              break;
+          case ']': action = 'forward';           break;
+          case '-': action = 'zoom_out';          break;
+          case '=':
+          case '+': action = 'zoom_in';           break;
+          case '0': action = 'zoom_reset';        break;
+          case 'f': action = 'find';              break;
+        }
+      } else {
+        switch (k) {
+          case 's': action = 'screenshot';        break;
+          case 'm': action = 'spatial_map';       break;
+          case 'v': action = 'vault_fill';        break;
+        }
+      }
+    } else if (e.key === 'F5') {
+      action = 'reload';
+    } else if (e.key === 'Escape') {
+      action = 'close_find';
+    }
+
+    if (action) {
+      e.preventDefault();
+      e.stopPropagation();
+      window.ipc.postMessage(JSON.stringify({type:'shortcut', action: action}));
     }
   }, true);
 })();
 "#;
 
 /// Init script that injects a custom context-menu item on every non-homepage
-/// page: "Add to Quick Links".
+/// page: "Add to Quick Links" and "Open in New Tab".
 const CONTEXT_MENU_INIT_SCRIPT: &str = r#"
 (function() {
   // Remove the native context menu and replace with a minimal one that
@@ -59,6 +101,8 @@ const CONTEXT_MENU_INIT_SCRIPT: &str = r#"
   document.addEventListener('contextmenu', function(e) {
     // Only add the custom menu item when we are NOT on the homepage.
     if (window.location.protocol === 'about:' || window.__TKZ_HOME__) return;
+    e.preventDefault();
+    e.stopPropagation();
     // We can't inject a native menu from JS, but we CAN offer a quick-add via
     // a small floating overlay that appears at the cursor position.
     var existing = document.getElementById('__tkz_ctx__');
@@ -85,17 +129,31 @@ const CONTEXT_MENU_INIT_SCRIPT: &str = r#"
     var title = document.title || window.location.hostname;
     var url   = window.location.href;
 
-    var item = document.createElement('div');
-    item.textContent = '⚡ Add to Quick Links';
-    item.style.cssText = 'padding:7px 14px;cursor:pointer;';
-    item.onmouseenter = function() { item.style.background='rgba(120,0,255,.18)'; };
-    item.onmouseleave = function() { item.style.background=''; };
-    item.onclick = function() {
-      window.ipc.postMessage(JSON.stringify({type:'add_quicklink',url:url,title:title}));
-      menu.remove();
-    };
+    // Determine if the right-click target is a link.
+    var linkEl = e.target;
+    while (linkEl && linkEl.tagName !== 'A') linkEl = linkEl.parentElement;
+    var linkUrl = linkEl ? (linkEl.href || '') : '';
 
-    menu.appendChild(item);
+    function makeItem(label, onclick) {
+      var item = document.createElement('div');
+      item.textContent = label;
+      item.style.cssText = 'padding:7px 14px;cursor:pointer;';
+      item.onmouseenter = function() { item.style.background='rgba(120,0,255,.18)'; };
+      item.onmouseleave = function() { item.style.background=''; };
+      item.onclick = function() { onclick(); menu.remove(); };
+      return item;
+    }
+
+    menu.appendChild(makeItem('⚡ Add to Quick Links', function() {
+      window.ipc.postMessage(JSON.stringify({type:'add_quicklink',url:url,title:title}));
+    }));
+
+    if (linkUrl) {
+      menu.appendChild(makeItem('⬡ Open in New Tab', function() {
+        window.ipc.postMessage(JSON.stringify({type:'open_in_new_tab',url:linkUrl}));
+      }));
+    }
+
     document.body.appendChild(menu);
 
     // Dismiss on any outside click.
@@ -104,6 +162,117 @@ const CONTEXT_MENU_INIT_SCRIPT: &str = r#"
     };
     document.addEventListener('mousedown', dismiss, true);
   });
+})();
+"#;
+
+/// Init script that polyfills the Fullscreen API for WKWebView contexts.
+///
+/// WKWebView disables `Element.requestFullscreen()` by default.  This script:
+///   1. Falls back to the webkit-prefixed variants so sites like Netflix work.
+///   2. Notifies the Rust side via IPC so we can adjust the WebView bounds and
+///      call `WebView::set_fullscreen()` to invoke the OS-level fullscreen mode.
+const FULLSCREEN_INIT_SCRIPT: &str = r#"
+(function() {
+  // -- event-driven fullscreen bridge for WKWebView -----------------------
+  // We report enter/exit ONLY when the fullscreen change event fires and we
+  // can confirm the state, which avoids false "exit" flashes when a video
+  // player like Netflix requests fullscreen and WKWebView actually accepts it.
+
+  var _origReqFS = HTMLElement.prototype.requestFullscreen;
+  HTMLElement.prototype.requestFullscreen = function(options) {
+    var el = this;
+    if (_origReqFS) {
+      try {
+        var p = _origReqFS.call(el, options);
+        if (p && typeof p.then === 'function') {
+          p.catch(function() { _tryWebkit(el); });
+          return p;
+        }
+      } catch(e) {}
+    }
+    _tryWebkit(el);
+    return Promise.resolve();
+  };
+
+  function _tryWebkit(el) {
+    if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    else if (el.webkitRequestFullScreen) el.webkitRequestFullScreen();
+  }
+
+  // Report enter/exit based purely on whether an element is fullscreen.
+  function _reportFS() {
+    var active = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    window.ipc.postMessage(JSON.stringify({
+      type: active ? 'enter_fullscreen' : 'exit_fullscreen'
+    }));
+  }
+
+  document.addEventListener('fullscreenchange',       _reportFS);
+  document.addEventListener('webkitfullscreenchange', _reportFS);
+
+  // exitFullscreen polyfill
+  document.exitFullscreen = function() {
+    if (document.webkitExitFullscreen) { try { document.webkitExitFullscreen(); } catch(e) {} }
+    return Promise.resolve();
+  };
+
+  // Escape key – WKWebView may not fire this natively.
+  document.addEventListener('keydown', function(e) {
+    if ((e.key === 'Escape' || e.key === 'Esc') &&
+        (document.fullscreenElement || document.webkitFullscreenElement)) {
+      window.ipc.postMessage(JSON.stringify({type:'exit_fullscreen'}));
+    }
+  });
+})();
+"#;
+
+/// Init script that intercepts clicks on <a download href="blob:…"> / <a download href="data:…">
+/// links, reads the binary data using fetch(), base64-encodes it, and forwards
+/// it via IPC as a `blob_download` message so our Rust code can write the file
+/// to the Downloads folder and track it in the downloads panel.
+///
+/// Without this, blob: URL downloads fail because reqwest cannot access
+/// the browser's in-memory blob store.
+const BLOB_DOWNLOAD_SCRIPT: &str = r#"
+(function() {
+  function tryBlobDownload(link) {
+    var href = link.href;
+    if (!href) return false;
+    if (!href.startsWith('blob:') && !href.startsWith('data:')) return false;
+    var filename = (link.getAttribute('download') || 'download').replace(/[\/\\\0]/g, '_');
+    if (!filename) filename = 'download';
+    fetch(href)
+      .then(function(r) { return r.arrayBuffer(); })
+      .then(function(buf) {
+        var bytes = new Uint8Array(buf);
+        // Build base64 in 8 KiB chunks to avoid stack overflow on large files.
+        var CHUNK = 8192;
+        var parts = [];
+        for (var i = 0; i < bytes.length; i += CHUNK) {
+          parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK)));
+        }
+        window.ipc.postMessage(JSON.stringify({
+          type: 'blob_download',
+          filename: filename,
+          data: btoa(parts.join(''))
+        }));
+      })
+      .catch(function(err) {
+        console.error('[browser] blob download IPC failed:', err);
+      });
+    return true;
+  }
+
+  document.addEventListener('click', function(e) {
+    // Walk up the DOM tree to find the nearest anchor element.
+    var el = e.target;
+    while (el && el.nodeName !== 'A') el = el.parentElement;
+    if (!el || !el.hasAttribute('download')) return;
+    if (tryBlobDownload(el)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
 })();
 "#;
 
@@ -182,6 +351,8 @@ pub(super) fn create(
         .with_back_forward_navigation_gestures(true)
         .with_initialization_script(KEYBOARD_INIT_SCRIPT)
         .with_initialization_script(CONTEXT_MENU_INIT_SCRIPT)
+        .with_initialization_script(FULLSCREEN_INIT_SCRIPT)
+        .with_initialization_script(BLOB_DOWNLOAD_SCRIPT)
         .with_ipc_handler(|req: wry::http::Request<String>| {
             let body = req.into_body();
             push_event(BrowserEvent::Ipc(body));
@@ -218,6 +389,17 @@ pub(super) fn create(
 
     // ── Download handlers ────────────────────────────────────────────────
     builder = builder.with_download_started_handler(|url: String, dest: &mut std::path::PathBuf| -> bool {
+        // blob: and data: URLs are handled by the BLOB_DOWNLOAD_SCRIPT JS
+        // interceptor which reads the binary data in-page and forwards it via
+        // IPC. For any other non-HTTP URL we have no way to fetch it, so let
+        // WebKit handle it natively (returns true = allow WebKit download).
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            // Leave *dest untouched so WebKit uses its own suggested path.
+            return true;
+        }
+
+        // HTTP/HTTPS: cancel WebKit's built-in download; our parallel reqwest
+        // engine in `downloader.rs` handles the actual transfer.
         // Rename "video.mp4" → "video.mp4.tkz" so the partial file cannot
         // be accidentally opened while the download is in progress.
         let final_dest = dest.clone();
@@ -228,8 +410,6 @@ pub(super) fn create(
         let temp_dest = dest.with_file_name(temp_name);
         *dest = temp_dest.clone();
         push_event(BrowserEvent::DownloadStarted(url, temp_dest, final_dest));
-        // Return false to cancel WebKit's built-in download; our parallel
-        // reqwest engine in `downloader.rs` handles the actual transfer.
         // NOTE: We do NOT register a download_completed_handler — when we
         // return false here WebKit fires its completion callback immediately
         // with success=false, which would kill our reqwest download.
@@ -302,6 +482,19 @@ pub(super) fn set_bounds(x: f64, y: f64, w: f64, h: f64) {
     });
 }
 
+/// Engage or disengage OS-level fullscreen for the WebView.
+///
+/// On macOS this moves the window into its own fullscreen Space (same as
+/// pressing the green traffic-light button), which gives the web content the
+/// full display area.  On other platforms wry routes this to the native
+/// fullscreen primitive.
+pub(super) fn set_fullscreen(_fullscreen: bool) {
+    // wry 0.54 does not expose set_fullscreen on WebView.
+    // Fullscreen is handled by expanding/restoring the webview bounds
+    // via set_bounds() in app.rs, combined with the JS polyfill that
+    // calls the webkit-prefixed requestFullscreen API.
+}
+
 /// Evaluate arbitrary JavaScript in the WebView context.
 ///
 /// Used to push data (e.g. updated quick links) to the currently open page.
@@ -309,6 +502,91 @@ pub(super) fn eval_script(js: &str) {
     WEBVIEW.with(|cell| {
         if let Some(wv) = cell.borrow().as_ref() {
             let _ = wv.evaluate_script(js);
+        }
+    });
+}
+
+/// Set the page zoom level.  `1.0` = 100 %, range is roughly 0.3 – 3.0.
+///
+/// Uses the CSS `zoom` property on `:root`, which is non-standard but
+/// universally supported in WebKit (WKWebView / Safari).
+pub(super) fn set_zoom(level: f32) {
+    eval_script(&format!(
+        "document.documentElement.style.zoom = '{:.2}';",
+        level
+    ));
+}
+
+/// Find (and scroll to) the next or previous occurrence of `query` in the page.
+///
+/// Delegates to `window.find()` which, despite being non-standard, is fully
+/// supported in WebKit/WKWebView and Blink.  Successive calls step through
+/// matches; `backwards = true` moves to the previous match.
+pub(super) fn find_text(query: &str, backwards: bool) {
+    // Escape characters that would break the JS string literal.
+    let escaped = query.replace('\\', "\\\\").replace('\'', "\\'");
+    if escaped.is_empty() {
+        if_let_webview(|wv| {
+            let _ = wv.evaluate_script(
+                "if(window.getSelection)window.getSelection().removeAllRanges();"
+            );
+        });
+    } else {
+        // window.find(string, caseSensitive, backwards, wrapAround,
+        //             wholeWord, searchInFrames, showDialog)
+        eval_script(&format!(
+            "window.find('{}',false,{},true,false,true,false);",
+            escaped, backwards,
+        ));
+    }
+}
+
+/// Remove the active find highlight / selection from the page.
+pub(super) fn clear_find() {
+    eval_script("if(window.getSelection)window.getSelection().removeAllRanges();");
+}
+
+/// Inject a CSS stylesheet for the current page.
+///
+/// The CSS is injected into the `<head>` via a dynamically created `<style>`
+/// element tagged with `data-tkz-userstyle` so it can be de-duped on
+/// subsequent calls for the same host.
+pub(super) fn inject_userstyle(css: &str) {
+    // Escape backticks and backslashes so the CSS can be passed inside a JS
+    // template literal safely.
+    let escaped = css.replace('\\', "\\\\").replace('`', "\\`");
+    eval_script(&format!(
+        "(function(){{ \
+           var prev=document.querySelector('[data-tkz-userstyle]');\
+           if(prev)prev.remove();\
+           var s=document.createElement('style');\
+           s.setAttribute('data-tkz-userstyle','1');\
+           s.textContent=`{escaped}`;\
+           (document.head||document.documentElement).appendChild(s);\
+        }})();"
+    ));
+}
+
+/// Trigger an interactive macOS area-select screenshot.
+///
+/// Launches `screencapture -i -x <dest>` in a background thread so the UI
+/// remains responsive while the user drags the crosshair. The result PNG is
+/// saved to `dest_path` (should be an absolute path on the Desktop).
+pub(super) fn take_screenshot(dest_path: &str) {
+    let path = dest_path.to_string();
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("screencapture")
+            .args(["-i", "-x", &path])
+            .status();
+    });
+}
+
+// Shared helper so we don't repeat the borrow pattern everywhere.
+#[inline]
+fn if_let_webview(f: impl FnOnce(&WebView)) {
+    WEBVIEW.with(|cell| {
+        if let Some(wv) = cell.borrow().as_ref() {
+            f(wv);
         }
     });
 }

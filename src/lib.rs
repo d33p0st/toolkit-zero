@@ -632,3 +632,7 @@ pub mod dependency_graph;
 #[cfg(feature = "browser")]
 #[cfg_attr(docsrs, doc(cfg(feature = "browser")))]
 pub mod browser;
+
+#[cfg(feature = "signatures")]
+#[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
+pub mod signatures;
