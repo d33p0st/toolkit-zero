@@ -43,7 +43,6 @@ pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream 
                     Some(id) => id.clone(),
                     None     => continue, // unnamed fields don't get per-field helpers
                 };
-                let field_ty = field.ty.clone();
 
                 let mut found_key: Option<LitStr> = None;
 
@@ -72,7 +71,6 @@ pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream 
 
                 if let Some(key_lit) = found_key {
                     let seal_fn = format_ident!("seal_{}", field_name);
-                    let open_fn = format_ident!("open_{}", field_name);
 
                     per_field_methods.push(quote! {
                         /// Seal the `#field_name` field with its associated key.
@@ -84,19 +82,6 @@ pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream 
                         > {
                             ::toolkit_zero::serialization::seal(
                                 &self.#field_name,
-                                ::std::option::Option::Some(#key_lit.to_string()),
-                            )
-                        }
-
-                        /// Open a blob sealed by `seal_#field_name`.
-                        pub fn #open_fn(
-                            bytes: &[u8],
-                        ) -> ::std::result::Result<
-                            #field_ty,
-                            ::toolkit_zero::serialization::SerializationError,
-                        > {
-                            ::toolkit_zero::serialization::open::<#field_ty, ::std::string::String>(
-                                bytes,
                                 ::std::option::Option::Some(#key_lit.to_string()),
                             )
                         }
@@ -127,20 +112,6 @@ pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream 
                 ::toolkit_zero::serialization::SerializationError,
             > {
                 ::toolkit_zero::serialization::seal(self, key)
-            }
-
-            /// Open a byte blob produced by [`seal`] back into `Self`.
-            ///
-            /// Pass the same key that was used in [`seal`], or `None` for the
-            /// default key.  The key is moved in and zeroized on drop.
-            pub fn open(
-                bytes: &[u8],
-                key: ::std::option::Option<::std::string::String>,
-            ) -> ::std::result::Result<
-                Self,
-                ::toolkit_zero::serialization::SerializationError,
-            > {
-                ::toolkit_zero::serialization::open::<Self, ::std::string::String>(bytes, key)
             }
 
             #(#per_field_methods)*
