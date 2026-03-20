@@ -367,7 +367,7 @@ impl<'a> RequestBuilder<'a> {
         let resp = self.method.apply_async(&self.client.async_client(), &url)
             .send().await?;
         log::debug!("Response status: {}", resp.status());
-        resp.json::<R>().await
+        resp.error_for_status()?.json::<R>().await
     }
 
     /// Sends the request synchronously and deserialises the response body as `R`.
@@ -388,7 +388,7 @@ impl<'a> RequestBuilder<'a> {
         let resp = self.method.apply_sync(&self.client.sync_client(), &url)
             .send()?;
         log::debug!("Response status: {}", resp.status());
-        resp.json::<R>()
+        resp.error_for_status()?.json::<R>()
     }
 
     /// Attaches an authenticated-encrypted body (ChaCha20-Poly1305), transitioning to
@@ -506,7 +506,7 @@ impl<'a, T: Serialize> JsonRequestBuilder<'a, T> {
             .json(&self.body)
             .send().await?;
         log::debug!("Response status: {}", resp.status());
-        resp.json::<R>().await
+        resp.error_for_status()?.json::<R>().await
     }
 
     /// Sends the request synchronously with the JSON body and deserialises the response as `R`.
@@ -532,7 +532,7 @@ impl<'a, T: Serialize> JsonRequestBuilder<'a, T> {
             .json(&self.body)
             .send()?;
         log::debug!("Response status: {}", resp.status());
-        resp.json::<R>()
+        resp.error_for_status()?.json::<R>()
     }
 }
 
@@ -595,7 +595,7 @@ impl<'a, T: Serialize> QueryRequestBuilder<'a, T> {
             .query(&self.params)
             .send().await?;
         log::debug!("Response status: {}", resp.status());
-        resp.json::<R>().await
+        resp.error_for_status()?.json::<R>().await
     }
 
     /// Sends the request synchronously with query parameters and deserialises the response as `R`.
@@ -621,7 +621,7 @@ impl<'a, T: Serialize> QueryRequestBuilder<'a, T> {
             .query(&self.params)
             .send()?;
         log::debug!("Response status: {}", resp.status());
-        resp.json::<R>()
+        resp.error_for_status()?.json::<R>()
     }
 }
 
@@ -631,6 +631,7 @@ impl<'a, T: Serialize> QueryRequestBuilder<'a, T> {
 ///
 /// Wraps either a transport-level [`reqwest::Error`] or a cipher failure.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ClientError {
     /// The underlying HTTP transport failed (connection refused, timeout, etc.).
     Transport(reqwest::Error),
@@ -647,7 +648,14 @@ impl std::fmt::Display for ClientError {
     }
 }
 
-impl std::error::Error for ClientError {}
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(e)     => Some(e),
+            Self::Serialization(e) => Some(e),
+        }
+    }
+}
 
 impl From<reqwest::Error> for ClientError {
     fn from(e: reqwest::Error) -> Self { Self::Transport(e) }
@@ -800,12 +808,14 @@ impl<'a, T: bincode::Encode> EncryptedQueryRequestBuilder<'a, T> {
 /// // Async client with a 10-second timeout
 /// let client = ClientBuilder::new(Target::Localhost(8080))
 ///     .timeout(Duration::from_secs(10))
-///     .build_async();
+///     .build_async()
+///     .unwrap();
 ///
 /// // Sync client with a 30-second timeout
 /// let client = ClientBuilder::new(Target::Remote("https://api.example.com".to_string()))
 ///     .timeout(Duration::from_secs(30))
-///     .build_sync();
+///     .build_sync()
+///     .unwrap();
 /// ```
 pub struct ClientBuilder {
     target:  Target,
@@ -830,17 +840,21 @@ impl ClientBuilder {
 
     /// Build an **async-only** [`Client`]. Safe to call from any context,
     /// including inside `#[tokio::main]`.
-    pub fn build_async(self) -> Client {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`reqwest::Error`] if the TLS backend cannot be initialized.
+    pub fn build_async(self) -> Result<Client, reqwest::Error> {
         log::debug!("Building async-only client (timeout={:?})", self.timeout);
         let mut builder = AsyncClient::builder();
         if let Some(t) = self.timeout {
             builder = builder.timeout(t);
         }
-        Client {
+        Ok(Client {
             target:       self.target,
-            async_client: Some(builder.build().expect("failed to build reqwest async client")),
+            async_client: Some(builder.build()?),
             sync_client:  None,
-        }
+        })
     }
 
     /// Build a **sync-only** [`Client`].
@@ -849,17 +863,21 @@ impl ClientBuilder {
     ///
     /// Panics if called from within an async context (same restriction as
     /// `reqwest::blocking::Client`). See [`Client::new_sync`] for details.
-    pub fn build_sync(self) -> Client {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`reqwest::Error`] if the TLS backend cannot be initialized.
+    pub fn build_sync(self) -> Result<Client, reqwest::Error> {
         log::debug!("Building sync-only client (timeout={:?})", self.timeout);
         let mut builder = BlockingClient::builder();
         if let Some(t) = self.timeout {
             builder = builder.timeout(t);
         }
-        Client {
+        Ok(Client {
             target:       self.target,
             async_client: None,
-            sync_client:  Some(builder.build().expect("failed to build reqwest blocking client")),
-        }
+            sync_client:  Some(builder.build()?),
+        })
     }
 
     /// Build a client that supports **both** async and blocking sends.
@@ -867,7 +885,11 @@ impl ClientBuilder {
     /// # Panics
     ///
     /// Panics if called from within an async context. See [`Client::new`] for details.
-    pub fn build(self) -> Client {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`reqwest::Error`] if the TLS backend cannot be initialized.
+    pub fn build(self) -> Result<Client, reqwest::Error> {
         if tokio::runtime::Handle::try_current().is_ok() {
             panic!(
                 "ClientBuilder::build() called inside an async context. \
@@ -881,10 +903,10 @@ impl ClientBuilder {
             async_builder = async_builder.timeout(t);
             sync_builder  = sync_builder.timeout(t);
         }
-        Client {
+        Ok(Client {
             target:       self.target,
-            async_client: Some(async_builder.build().expect("failed to build reqwest async client")),
-            sync_client:  Some(sync_builder.build().expect("failed to build reqwest blocking client")),
-        }
+            async_client: Some(async_builder.build()?),
+            sync_client:  Some(sync_builder.build()?),
+        })
     }
 }

@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>New Tab</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --border:    #21262d;
+      --border-h:  #30363d;
+      --text:      #e6edf3;
+      --muted:     #8b949e;
+      --accent:    #58a6ff;
+      --uv:        #7700ff;
+      --uv-dim:    rgba(119,0,255,.18);
+      --btn-bg:    #1f6feb;
+      --btn-h:     #388bfd;
+      --danger:    #da3633;
+    }
+
+    /* ── light theme overrides ── */
+    [data-theme="light"] {
+      --bg:        #f4f5f7;
+      --surface:   #ffffff;
+      --border:    #d0d7de;
+      --border-h:  #8c959f;
+      --text:      #1c2128;
+      --muted:     #57606a;
+      --accent:    #0969da;
+      --uv:        #6600ee;
+      --uv-dim:    rgba(102,0,238,.12);
+      --btn-bg:    #0969da;
+      --btn-h:     #0860ca;
+      --danger:    #cf222e;
+    }
+    /* wordmark ’zero’ uses a CSS var so it shifts with the theme */
+    [data-theme="light"] .shortcut {
+      background: #fff;
+      border-color: var(--border);
+      color: var(--muted);
+    }
+    [data-theme="light"] .shortcut:hover {
+      border-color: var(--border-h);
+      color: var(--text);
+    }
+    [data-theme="light"] .search-wrap form {
+      background: #fff;
+      border-color: var(--border);
+    }
+    [data-theme="light"] .ql-header hr { border-top-color: var(--border); }
+    [data-theme="light"] .modal {
+      background: #ffffff;
+      border-color: rgba(102,0,238,.3);
+    }
+    [data-theme="light"] .modal input {
+      background: var(--bg);
+      border-color: var(--border);
+      color: var(--text);
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+                   "Helvetica Neue", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2.2rem;
+      padding: 2rem;
+    }
+
+    /* ── wordmark ── */
+    .wordmark {
+      font-size: clamp(2rem, 5vw, 3.5rem);
+      font-weight: 200;
+      letter-spacing: -0.03em;
+      user-select: none;
+    }
+    @keyframes zero-glow {
+      /* 20 stops (every 5%) trace a smooth sine-like curve: dark-blue → bright-blue → dark.
+         Use linear timing so WebKit never interpolates between sparse waypoints. */
+      0%   { color: hsl(220, 30%,  3%); text-shadow: 0 0  0px rgba(60,140,255,0.00); }
+      5%   { color: hsl(220, 33%,  4%); text-shadow: 0 0  1px rgba(60,140,255,0.02); }
+      10%  { color: hsl(220, 40%,  9%); text-shadow: 0 0  3px rgba(60,140,255,0.07); }
+      15%  { color: hsl(220, 51%, 15%); text-shadow: 0 0  6px rgba(60,140,255,0.14); }
+      20%  { color: hsl(220, 62%, 22%); text-shadow: 0 0  9px rgba(60,140,255,0.24); }
+      25%  { color: hsl(220, 73%, 29%); text-shadow: 0 0 12px rgba(60,140,255,0.36); }
+      30%  { color: hsl(220, 83%, 36%); text-shadow: 0 0 14px rgba(60,140,255,0.47); }
+      35%  { color: hsl(220, 90%, 41%); text-shadow: 0 0 16px rgba(60,140,255,0.57); }
+      40%  { color: hsl(220, 97%, 49%); text-shadow: 0 0 18px rgba(60,140,255,0.68); }
+      45%  { color: hsl(220,100%, 52%); text-shadow: 0 0 20px rgba(60,140,255,0.77); }
+      50%  { color: hsl(220,100%, 55%); text-shadow: 0 0 22px rgba(60,140,255,0.85); }
+      55%  { color: hsl(220,100%, 52%); text-shadow: 0 0 20px rgba(60,140,255,0.77); }
+      60%  { color: hsl(220, 97%, 49%); text-shadow: 0 0 18px rgba(60,140,255,0.68); }
+      65%  { color: hsl(220, 90%, 44%); text-shadow: 0 0 16px rgba(60,140,255,0.57); }
+      70%  { color: hsl(220, 83%, 36%); text-shadow: 0 0 14px rgba(60,140,255,0.47); }
+      75%  { color: hsl(220, 73%, 29%); text-shadow: 0 0 12px rgba(60,140,255,0.36); }
+      80%  { color: hsl(220, 62%, 22%); text-shadow: 0 0  9px rgba(60,140,255,0.24); }
+      85%  { color: hsl(220, 51%, 15%); text-shadow: 0 0  6px rgba(60,140,255,0.14); }
+      90%  { color: hsl(220, 40%,  9%); text-shadow: 0 0  3px rgba(60,140,255,0.07); }
+      95%  { color: hsl(220, 33%,  4%); text-shadow: 0 0  1px rgba(60,140,255,0.02); }
+      100% { color: hsl(220, 30%,  3%); text-shadow: 0 0  0px rgba(60,140,255,0.00); }
+    }
+    .wordmark span {
+      font-weight: 400;
+      animation: zero-glow 3.6s linear infinite;
+    }
+
+    /* ── search bar (single flush strip) ── */
+    .search-wrap { width: min(540px, 100%); }
+
+    .search-wrap form {
+      display: flex;
+      gap: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 5px 5px 5px 18px;
+      transition: border-color 0.15s;
+    }
+    .search-wrap form:focus-within { border-color: var(--uv); box-shadow: 0 0 0 2px rgba(119,0,255,.15); }
+
+    .search-wrap input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 1rem;
+      min-width: 0;
+    }
+    .search-wrap input::placeholder { color: var(--muted); }
+
+    .search-wrap button {
+      background: var(--uv);
+      color: #fff;
+      border: none;
+      border-radius: 22px;
+      padding: 7px 18px;
+      font-family: inherit;
+      font-size: 0.88rem;
+      cursor: pointer;
+      transition: background 0.15s;
+      white-space: nowrap;
+    }
+    .search-wrap button:hover { background: #9933ff; }
+
+    /* ── quick links ── */
+    .ql-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: min(520px, 100%);
+      font-size: 0.7rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #484f58;
+    }
+    .ql-header hr { flex: 1; border: none; border-top: 1px solid #21262d; }
+    .ql-edit-btn {
+      background: none; border: none; color: #484f58; cursor: pointer;
+      font-size: 0.68rem; letter-spacing: 0.05em; padding: 2px 6px;
+      border-radius: 4px; transition: color 0.15s, background 0.15s;
+    }
+    .ql-edit-btn:hover { color: var(--text); background: rgba(255,255,255,.06); }
+
+    .shortcuts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: center;
+      width: min(520px, 100%);
+      min-height: 76px;
+    }
+
+    .shortcut {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      width: 76px;
+      padding: 14px 8px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      text-decoration: none;
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.01em;
+      transition: border-color 0.15s, color 0.15s, transform 0.1s, box-shadow 0.15s;
+      cursor: grab;
+      user-select: none;
+    }
+    .shortcut:hover {
+      border-color: var(--border-h);
+      color: var(--text);
+      transform: translateY(-2px);
+    }
+    .shortcut.dragging {
+      opacity: 0.4;
+      cursor: grabbing;
+    }
+    .shortcut.drag-over {
+      border-color: var(--uv);
+      box-shadow: 0 0 0 2px var(--uv-dim);
+    }
+    .shortcut .icon { font-size: 1.5rem; line-height: 1; pointer-events: none; }
+    .shortcut .label { pointer-events: none; }
+
+    /* remove button (edit mode) */
+    .shortcut .rm-btn {
+      display: none;
+      position: absolute;
+      top: -7px; right: -7px;
+      width: 18px; height: 18px;
+      background: var(--danger);
+      color: #fff;
+      border: 2px solid var(--bg);
+      border-radius: 50%;
+      font-size: 10px;
+      line-height: 14px;
+      text-align: center;
+      cursor: pointer;
+      pointer-events: all;
+    }
+    body.edit-mode .shortcut .rm-btn { display: block; }
+    body.edit-mode .shortcut { border-color: rgba(119,0,255,.3); }
+    body.edit-mode .shortcut:hover { transform: none; }
+
+    /* add-link tile */
+    .shortcut-add {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      width: 76px;
+      height: 98px;
+      background: transparent;
+      border: 1.5px dashed #30363d;
+      border-radius: 14px;
+      color: #484f58;
+      font-size: 1.4rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    body.edit-mode .shortcut-add { display: flex; }
+    .shortcut-add:hover { border-color: var(--uv); color: var(--uv); }
+
+    /* ── footer hint ── */
+    .hint {
+      color: #484f58;
+      font-size: 0.65rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      text-align: center;
+    }
+
+    /* ── add link modal ── */
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.6);
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: #161b22;
+      border: 1px solid rgba(119,0,255,.35);
+      border-radius: 12px;
+      padding: 1.4rem 1.6rem;
+      width: min(340px, 90vw);
+      display: flex;
+      flex-direction: column;
+      gap: 0.9rem;
+    }
+    .modal h3 { font-size: 0.95rem; font-weight: 500; color: var(--text); }
+    .modal input {
+      width: 100%;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 7px 10px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.88rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .modal input:focus { border-color: var(--uv); }
+    .modal .modal-row { display: flex; gap: 8px; justify-content: flex-end; }
+    .modal button {
+      padding: 7px 16px;
+      border-radius: 8px;
+      border: none;
+      font-family: inherit;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    .modal .btn-cancel { background: rgba(255,255,255,.07); color: var(--muted); }
+    .modal .btn-cancel:hover { background: rgba(255,255,255,.12); }
+    .modal .btn-add { background: var(--uv); color: #fff; }
+    .modal .btn-add:hover { background: #9933ff; }
+  </style>
+</head>
+<body>
+
+  <!-- flag so the context-menu init script knows this is the homepage -->
+  <script>window.__TKZ_HOME__ = true;</script>
+  <!-- restore theme from localStorage before first paint to avoid flash -->
+  <script>
+    (function(){
+      var t = localStorage.getItem('tkz-theme');
+      if (t) document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+
+  <h1 class="wordmark">duct<span>Tape</span></h1>
+
+  <div class="search-wrap">
+    <form onsubmit="doSearch(event)">
+      <input type="text" id="q" placeholder="Search or enter a URL" autofocus autocomplete="off">
+      <button type="submit">Go</button>
+    </form>
+  </div>
+
+  <div class="ql-header">
+    <hr>Quick Links
+    <button class="ql-edit-btn" id="editBtn" onclick="toggleEdit()">Edit</button>
+    <hr>
+  </div>
+
+  <nav class="shortcuts" id="shortcuts" aria-label="Quick links">
+    <!-- populated by renderLinks() -->
+    <div class="shortcut-add" title="Add quick link" onclick="openAddModal()">
+      <span>+</span>
+    </div>
+  </nav>
+
+  <p class="hint" id="hint">duct-tape &middot; Written in Rust &middot; Powered by the host OS&rsquo;s native web engine &middot; <span id="engineName"></span></p>
+
+  <!-- add-link modal -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <h3>Add Quick Link</h3>
+      <input type="url" id="addUrl" placeholder="https://example.com" autocomplete="off">
+      <input type="text" id="addLabel" placeholder="Label (e.g. Example)" maxlength="14" autocomplete="off">
+      <input type="text" id="addIcon" placeholder="Emoji icon (e.g. 🔗)" maxlength="4" autocomplete="off">
+      <div class="modal-row">
+        <button class="btn-cancel" onclick="closeAddModal()">Cancel</button>
+        <button class="btn-add" onclick="submitAdd()">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── engine detection ─────────────────────────────────────────────────────
+    (function() {
+      var ua = navigator.userAgent;
+      var name;
+      if (/Mac|iPhone|iPad/.test(ua)) name = 'WebKit';
+      else if (/Windows/.test(ua))    name = 'WebView2';
+      else                             name = 'WebKitGTK';
+      document.getElementById('engineName').textContent = name;
+    })();
+
+    // ── quicklinks data ─────────────────────────────────────────────────────
+    // Start empty and wait for Rust to call __tkzSetLinks with the saved links
+    // (or defaults if no file exists).  This prevents the default-then-saved
+    // flash that was visible on page refresh.
+    var _links = [];
+    // Fallback defaults — only used if Rust never calls __tkzSetLinks
+    // (e.g. the IPC channel is unusually slow or unavailable).
+    var _defaults = [
+      {url:'https://github.com',           label:'GitHub',  icon:'🐙'},
+      {url:'https://www.rust-lang.org',    label:'Rust',    icon:'🦀'},
+      {url:'https://crates.io',            label:'Crates',  icon:'📦'},
+      {url:'https://doc.rust-lang.org',    label:'Docs',    icon:'📖'},
+      {url:'https://news.ycombinator.com', label:'HN',      icon:'🔶'},
+      {url:'https://www.youtube.com',      label:'YouTube', icon:'▶️'},
+    ];
+    var _rustInjected = false;
+
+    var _editMode  = false;
+    var _dragSrcIdx = null;
+
+    // Called by Rust to switch theme.
+    window.__tkzSetTheme = function(dark) {
+      document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+      localStorage.setItem('tkz-theme', dark ? 'dark' : 'light');
+    };
+
+    // Called by Rust (via webview::eval_script) to push saved quicklinks.
+    window.__tkzSetLinks = function(links) {
+      _rustInjected = true;
+      _links = links;
+      renderLinks();
+    };
+
+    function renderLinks() {
+      var nav = document.getElementById('shortcuts');
+      // Keep the add-tile
+      var addTile = nav.querySelector('.shortcut-add');
+      nav.innerHTML = '';
+
+      _links.forEach(function(ql, i) {
+        var a = document.createElement('a');
+        a.className = 'shortcut';
+        a.href = _editMode ? '#' : ql.url;
+        // Drag-to-reorder only works in edit mode. Outside edit mode the element
+        // acts as a normal link; draggable=false prevents the OS link-drag gesture
+        // from interfering with the HTML5 DnD events we rely on.
+        a.draggable = _editMode;
+        a.dataset.idx = i;
+
+        a.innerHTML =
+          '<span class="icon">' + ql.icon + '</span>' +
+          '<span class="label">' + esc(ql.label) + '</span>' +
+          '<span class="rm-btn" title="Remove">✕</span>';
+
+        // Navigate on click (only when not in edit mode)
+        a.addEventListener('click', function(e) {
+          if (_editMode) { e.preventDefault(); return; }
+        });
+
+        // Remove button
+        a.querySelector('.rm-btn').addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          _links.splice(i, 1);
+          renderLinks();
+          window.ipc.postMessage(JSON.stringify({type:'remove_quicklink', url:ql.url}));
+        });
+
+        a.addEventListener('dragstart', function(e) {
+          if (!_editMode) { e.preventDefault(); return; }
+          _dragSrcIdx = i;
+          // setData is REQUIRED by Safari/WKWebView — without it the browser
+          // treats the drag as a native link-drag and drop events never fire.
+          e.dataTransfer.setData('text/plain', String(i));
+          e.dataTransfer.effectAllowed = 'move';
+          setTimeout(function(){ a.classList.add('dragging'); }, 0);
+        });
+        a.addEventListener('dragend', function() {
+          a.classList.remove('dragging');
+          document.querySelectorAll('.shortcut').forEach(function(el){
+            el.classList.remove('drag-over');
+          });
+        });
+        a.addEventListener('dragover', function(e) {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          document.querySelectorAll('.shortcut').forEach(function(el){
+            el.classList.remove('drag-over');
+          });
+          a.classList.add('drag-over');
+        });
+        a.addEventListener('drop', function(e) {
+          e.preventDefault();
+          if (_dragSrcIdx === null || _dragSrcIdx === i) return;
+          // Augment with original indices before mutation so we can send a
+          // correct permutation to Rust (old-index for each new position).
+          var indexed = _links.map(function(l, idx){ return {link: l, orig: idx}; });
+          var moved = indexed.splice(_dragSrcIdx, 1)[0];
+          indexed.splice(i, 0, moved);
+          _links = indexed.map(function(x){ return x.link; });
+          renderLinks();
+          // order[newPos] = oldIndex — lets Rust reconstruct from its saved list.
+          var order = indexed.map(function(x){ return x.orig; });
+          window.ipc.postMessage(JSON.stringify({type:'reorder_quicklinks', order:order}));
+        });
+
+        nav.appendChild(a);
+      });
+
+      nav.appendChild(addTile);
+    }
+
+    function toggleEdit() {
+      _editMode = !_editMode;
+      document.body.classList.toggle('edit-mode', _editMode);
+      document.getElementById('editBtn').textContent = _editMode ? 'Done' : 'Edit';
+      renderLinks();
+    }
+
+    // ── add modal ─────────────────────────────────────────────────────────────
+    function openAddModal() {
+      document.getElementById('addUrl').value   = '';
+      document.getElementById('addLabel').value = '';
+      document.getElementById('addIcon').value  = '';
+      document.getElementById('modalOverlay').classList.add('open');
+      document.getElementById('addUrl').focus();
+    }
+    function closeAddModal() {
+      document.getElementById('modalOverlay').classList.remove('open');
+    }
+    function submitAdd() {
+      var url   = document.getElementById('addUrl').value.trim();
+      var label = document.getElementById('addLabel').value.trim() || domainLabel(url);
+      var icon  = document.getElementById('addIcon').value.trim()  || '🔗';
+      if (!url) return;
+      if (!/^https?:\/\//.test(url)) url = 'https://' + url;
+      _links.push({url:url, label:label, icon:icon});
+      renderLinks();
+      window.ipc.postMessage(JSON.stringify({type:'add_quicklink', url:url, title:label}));
+      closeAddModal();
+    }
+    document.getElementById('modalOverlay').addEventListener('click', function(e){
+      if (e.target === this) closeAddModal();
+    });
+    document.addEventListener('keydown', function(e){
+      if (e.key === 'Escape') closeAddModal();
+    });
+
+    // ── search ────────────────────────────────────────────────────────────────
+    function doSearch(e) {
+      e.preventDefault();
+      var q = document.getElementById('q').value.trim();
+      if (!q) return;
+      if (/^https?:\/\//i.test(q))
+        window.location.href = q;
+      else if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/.*)?$/.test(q) && !q.includes(' '))
+        window.location.href = 'https://' + q;
+      else
+        window.location.href = 'https://www.google.com/search?q=' + encodeURIComponent(q);
+    }
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+    function esc(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function domainLabel(url) {
+      try {
+        var h = new URL(url.startsWith('http') ? url : 'https://'+url).hostname;
+        h = h.replace(/^www\./,'');
+        var p = h.split('.')[0];
+        return p.charAt(0).toUpperCase() + p.slice(1);
+      } catch(e) { return 'Link'; }
+    }
+
+    renderLinks();
+
+    // If Rust hasn't injected links within 400 ms (e.g. slow cold start),
+    // fall back to the bundled defaults so the page never looks empty.
+    setTimeout(function() {
+      if (!_rustInjected) {
+        _links = _defaults.slice();
+        renderLinks();
+      }
+    }, 400);
+  </script>
+</body>
+</html>

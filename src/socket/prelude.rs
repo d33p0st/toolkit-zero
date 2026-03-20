@@ -6,7 +6,6 @@
 //!
 //! ```rust,no_run
 //! use toolkit_zero::socket::prelude::*;
-//! # use toolkit_zero::socket::server::reply;
 //!
 //! // Server types — fluent builder
 //! let mut server = Server::default();
@@ -21,14 +20,14 @@
 //! ```
 //!
 //! Re-exports are gated by feature flags:
-//! - `socket-server` / `socket`: [`Server`], [`ServerMechanism`], [`Status`], [`mechanism`]
-//! - `socket-client` / `socket`: [`Client`], [`ClientError`], [`Target`], [`request`]
+//! - `socket-server` / `socket`: [`Server`], [`ServerMechanism`], [`Status`], [`mechanism`], [`reply!`], [`html_reply`], [`forbidden`]
+//! - `socket-client` / `socket`: [`Client`], [`ClientBuilder`], [`ClientError`], [`Target`], [`request`]
 //! - always available: [`SerializationKey`]
 
 pub use crate::socket::SerializationKey;
 
 #[cfg(any(feature = "socket", feature = "socket-server"))]
-pub use crate::socket::server::{Server, ServerMechanism, Status, mechanism};
+pub use crate::socket::server::{Server, ServerMechanism, Status, mechanism, reply, html_reply, forbidden};
 
 #[cfg(any(feature = "socket", feature = "socket-client"))]
 pub use crate::socket::client::{Client, ClientBuilder, ClientError, Target, request};

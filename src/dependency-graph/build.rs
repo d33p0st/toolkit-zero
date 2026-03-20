@@ -81,6 +81,11 @@ pub enum BuildTimeFingerprintError {
     IoError(std::io::Error),
     /// The final JSON could not be serialised.
     SerializationFailed(String),
+    /// A required Cargo build-script environment variable was not set.
+    ///
+    /// This typically means the function was called outside a Cargo build script.
+    /// The inner value names the missing variable (e.g. `"OUT_DIR"`).
+    EnvVarMissing(&'static str),
 }
 
 impl std::fmt::Display for BuildTimeFingerprintError {
@@ -92,6 +97,7 @@ impl std::fmt::Display for BuildTimeFingerprintError {
             Self::CargoLockNotFound(p)        => write!(f, "Cargo.lock not found at: {p}"),
             Self::IoError(e)                  => write!(f, "I/O error: {e}"),
             Self::SerializationFailed(e)      => write!(f, "serialisation failed: {e}"),
+            Self::EnvVarMissing(v)            => write!(f, "required env var not set: {v} (is this running inside a Cargo build script?)"),
         }
     }
 }
@@ -131,8 +137,10 @@ pub fn generate_fingerprint(export: bool) -> Result<(), BuildTimeFingerprintErro
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
 
-    let out_dir      = env::var("OUT_DIR").unwrap_or_default();
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let out_dir      = env::var("OUT_DIR")
+        .map_err(|_| BuildTimeFingerprintError::EnvVarMissing("OUT_DIR"))?;
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")
+        .map_err(|_| BuildTimeFingerprintError::EnvVarMissing("CARGO_MANIFEST_DIR"))?;
 
     // Build the fingerprint once — shared by both the compact and pretty copies.
     let fingerprint = build_fingerprint()?;
@@ -180,7 +188,8 @@ pub fn generate_fingerprint(export: bool) -> Result<(), BuildTimeFingerprintErro
 pub fn export(enabled: bool) -> Result<(), BuildTimeFingerprintError> {
     if !enabled { return Ok(()); }
 
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")
+        .map_err(|_| BuildTimeFingerprintError::EnvVarMissing("CARGO_MANIFEST_DIR"))?;
 
     let fingerprint = build_fingerprint()?;
     let pretty = serde_json::to_string_pretty(&fingerprint)

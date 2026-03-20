@@ -11,8 +11,8 @@
 //! `serve*` methods, each of which returns a [`ServerFuture`].  A `ServerFuture`
 //! can be `.await`'d to run the server inline **or** called `.background()` on to
 //! spawn it as a background Tokio task and get a [`tokio::task::JoinHandle`] back.
-//! Graceful shutdown is available via
-//! [`Server::serve_with_graceful_shutdown`] and [`Server::serve_from_listener`].
+//! Use [`Server::serve_with_graceful_shutdown`] or [`Server::rebind`] for built-in
+//! graceful shutdown on a custom signal or Ctrl+C respectively.
 //!
 //! For **runtime address migration**, use [`Server::serve_managed`]: it starts
 //! the server immediately and returns a [`BackgroundServer`] handle that supports
@@ -1283,7 +1283,7 @@ fn decode_query<T: bincode::Decode<()>>(
 
     let q: DataParam = serde_urlencoded::from_str(raw_query).map_err(|_| {
         log::debug!("encrypted query missing `data` parameter");
-        Rejection::forbidden()
+        Rejection::bad_request()
     })?;
 
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1319,6 +1319,7 @@ pub fn forbidden() -> Rejection {
 /// [`reply_with_status`] and [`reply_with_status_and_json`].  Also usable directly
 /// in the [`reply!`] macro via the `status => Status::X` argument.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum Status {
     // 2xx
     Ok,
@@ -1410,11 +1411,10 @@ impl From<Status> for http::StatusCode {
 /// ```
 ///
 /// # Caution
-/// Calling [`serve`](Server::serve) with no routes registered will **panic**.
+/// Calling [`serve`](Server::serve) with no routes registered will result in a server
+/// that returns `404 Not Found` for every request.
 pub struct Server {
     mechanisms: Vec<SocketType>,
-    /// Default bind address, set by [`rebind`](Server::rebind).
-    bind_addr: Option<std::net::SocketAddr>,
 }
 
 impl Default for Server {
@@ -1425,9 +1425,8 @@ impl Default for Server {
 
 impl Server {
     fn new() -> Self {
-        Self { mechanisms: Vec::new(), bind_addr: None }
+        Self { mechanisms: Vec::new() }
     }
-
     /// Registers a [`SocketType`] route on this server.
     ///
     /// Routes are evaluated in registration order.  Returns `&mut Self` for chaining.
@@ -1444,7 +1443,7 @@ impl Server {
     /// - **`.background()`'d** — spawns the server as a Tokio background task
     ///
     /// # Panics
-    /// Panics if no routes have been registered or if the address cannot be bound.
+    /// Panics if the address cannot be bound.
     pub fn serve(self, addr: impl Into<SocketAddr>) -> ServerFuture {
         let addr   = addr.into();
         let routes = Arc::new(tokio::sync::RwLock::new(self.mechanisms));
@@ -1535,17 +1534,56 @@ impl Server {
         })
     }
 
-    /// Stores `addr` as this server's default bind address.
+    /// Binds to `addr`, serves all registered routes, and shuts down gracefully
+    /// when a Ctrl+C / SIGINT signal is received.
     ///
-    /// This is a pre-serve convenience setter.  Call it before
-    /// [`serve_managed`](Server::serve_managed) or any other `serve*` variant to
-    /// record the initial address without starting the server.
+    /// This is the idiomatic entry point for production use — in-flight requests
+    /// drain completely before the server process exits.
     ///
-    /// Returns `&mut Self` for method chaining.
-    pub fn rebind(&mut self, addr: impl Into<std::net::SocketAddr>) -> &mut Self {
-        self.bind_addr = Some(addr.into());
-        log::debug!("Default bind address updated to {:?}", self.bind_addr);
-        self
+    /// Returns a [`ServerFuture`] that can be:
+    /// - **`.await`'d** — runs the server in the current task until interrupted
+    /// - **`.background()`'d** — spawns the server as a Tokio background task
+    ///   and returns a `JoinHandle<()>`; the task stops gracefully on Ctrl+C
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use toolkit_zero::socket::server::{Server, ServerMechanism, reply};
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize)] struct Pong { ok: bool }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut server = Server::default();
+    /// server.mechanism(
+    ///     ServerMechanism::get("/ping")
+    ///         .onconnect(|| async { reply!(json => Pong { ok: true }) })
+    /// );
+    ///
+    /// // Run in foreground until Ctrl+C:
+    /// // server.rebind(([127, 0, 0, 1], 8080)).await;
+    ///
+    /// // Or spawn in background, stops gracefully on Ctrl+C:
+    /// let handle = server.rebind(([127, 0, 0, 1], 8080)).background();
+    /// // ... do other work ...
+    /// handle.await.ok();
+    /// # }
+    /// ```
+    pub fn rebind(self, addr: impl Into<std::net::SocketAddr>) -> ServerFuture {
+        let addr   = addr.into();
+        let routes = Arc::new(tokio::sync::RwLock::new(self.mechanisms));
+        ServerFuture::new(async move {
+            log::info!("Server binding to {} (graceful shutdown on Ctrl+C)", addr);
+            run_hyper_server(
+                routes,
+                addr,
+                async {
+                    tokio::signal::ctrl_c().await.ok();
+                    log::info!("Interrupt received — draining in-flight connections");
+                },
+            ).await;
+        })
     }
 
     /// Starts all registered routes in a background Tokio task and returns a
@@ -1559,48 +1597,64 @@ impl Server {
     /// - [`BackgroundServer::addr`]        — query the current bind address
     /// - [`BackgroundServer::stop`]        — shut down and await completion
     ///
+    /// The TCP port is bound **before** spawning the background task, so a bind
+    /// failure is returned to the caller immediately rather than silently breaking
+    /// the [`BackgroundServer`] handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::Error`] if the address cannot be bound
+    /// (port already in use, insufficient permissions, etc.).
+    ///
     /// # Panics
-    /// Panics if no routes have been registered.
+    ///
+    /// Panics if called outside a Tokio runtime.
     ///
     /// # Example
+    ///
     /// ```rust,no_run
-    /// # use toolkit_zero::socket::server::Server;
+    /// # use toolkit_zero::socket::server::{Server, ServerMechanism, reply};
     /// # use serde::Serialize;
-    /// # use toolkit_zero::socket::server::reply;
     /// # #[derive(Serialize)] struct Pong { ok: bool }
     /// # #[tokio::main]
     /// # async fn main() {
     /// let mut server = Server::default();
     /// server.mechanism(
-    ///     toolkit_zero::socket::server::ServerMechanism::get("/ping")
+    ///     ServerMechanism::get("/ping")
     ///         .onconnect(|| async { reply!(json => Pong { ok: true }) })
     /// );
     ///
-    /// let mut bg = server.serve_managed(([127, 0, 0, 1], 8080));
-    /// println!("Running on {}", bg.addr());
+    /// let mut bg = server.serve_managed(([127, 0, 0, 1], 8080)).unwrap();
+    /// assert_eq!(bg.addr().port(), 8080);
     ///
-    /// bg.rebind(([127, 0, 0, 1], 9090)).await;
-    /// println!("Rebound to {}", bg.addr());
+    /// bg.rebind(([127, 0, 0, 1], 9090)).await.unwrap();
+    /// assert_eq!(bg.addr().port(), 9090);
     ///
     /// bg.stop().await;
     /// # }
     /// ```
-    pub fn serve_managed(self, addr: impl Into<std::net::SocketAddr>) -> BackgroundServer {
-        let addr   = addr.into();
+    pub fn serve_managed(self, addr: impl Into<std::net::SocketAddr>) -> Result<BackgroundServer, std::io::Error> {
+        let addr = addr.into();
+        // Bind synchronously so the caller can observe a bind failure immediately,
+        // rather than discovering it through a silently-broken BackgroundServer handle.
+        let std_listener = std::net::TcpListener::bind(addr)?;
+        std_listener.set_nonblocking(true)?;
         let routes = Arc::new(tokio::sync::RwLock::new(self.mechanisms));
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let routes_ref = Arc::clone(&routes);
-        let handle = tokio::spawn(run_hyper_server(
-            routes_ref,
-            addr,
-            async { rx.await.ok(); },
-        ));
-        BackgroundServer {
+        let handle = tokio::spawn(async move {
+            // SAFETY: set_nonblocking(true) was called before this point.
+            let listener = tokio::net::TcpListener::from_std(std_listener)
+                .expect("from_std: listener must be non-blocking");
+            log::info!("server bound to {}", addr);
+            run_hyper_server_inner(routes_ref, listener, async { rx.await.ok(); }).await;
+        });
+        Ok(BackgroundServer {
             routes,
             addr,
             shutdown_tx: Some(tx),
             handle: Some(handle),
-        }
+        })
     }
 }
 
@@ -1810,15 +1864,16 @@ async fn run_hyper_server(
 ///     toolkit_zero::socket::server::ServerMechanism::get("/ping")
 ///         .onconnect(|| async { reply!(json => Pong { ok: true }) })
 /// );
-/// let mut bg = server.serve_managed(([127, 0, 0, 1], 8080));
+/// let mut bg = server.serve_managed(([127, 0, 0, 1], 8080)).unwrap();
 /// assert_eq!(bg.addr().port(), 8080);
 ///
-/// bg.rebind(([127, 0, 0, 1], 9090)).await;
+/// bg.rebind(([127, 0, 0, 1], 9090)).await.unwrap();
 /// assert_eq!(bg.addr().port(), 9090);
 ///
 /// bg.stop().await;
 /// # }
 /// ```
+#[must_use = "dropping BackgroundServer leaves the background task running; call .stop().await to shut it down"]
 pub struct BackgroundServer {
     /// Shared mutable route table — written by [`mechanism`](BackgroundServer::mechanism), read by the server loop.
     routes:      Arc<tokio::sync::RwLock<Vec<SocketType>>>,
@@ -1867,15 +1922,19 @@ impl BackgroundServer {
     /// #     toolkit_zero::socket::server::ServerMechanism::get("/ping")
     /// #         .onconnect(|| async { reply!(json => Pong { ok: true }) })
     /// # );
-    /// let mut bg = server.serve_managed(([127, 0, 0, 1], 8080));
+    /// let mut bg = server.serve_managed(([127, 0, 0, 1], 8080)).unwrap();
     ///
-    /// bg.rebind(([127, 0, 0, 1], 9090)).await;
+    /// bg.rebind(([127, 0, 0, 1], 9090)).await.unwrap();
     /// assert_eq!(bg.addr().port(), 9090);
     ///
     /// bg.stop().await;
     /// # }
     /// ```
-    pub async fn rebind(&mut self, addr: impl Into<std::net::SocketAddr>) {
+    pub async fn rebind(&mut self, addr: impl Into<std::net::SocketAddr>) -> Result<(), std::io::Error> {
+        let new_addr = addr.into();
+        // Bind the new address first — if it fails, the current server is unaffected.
+        let std_listener = std::net::TcpListener::bind(new_addr)?;
+        std_listener.set_nonblocking(true)?;
         // 1. Graceful shutdown of the current server.
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -1885,17 +1944,18 @@ impl BackgroundServer {
             let _ = h.await;
         }
         // 3. Start on the new address, sharing the existing route table.
-        let new_addr = addr.into();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         self.shutdown_tx = Some(tx);
         self.addr        = new_addr;
         let routes = Arc::clone(&self.routes);
-        self.handle = Some(tokio::spawn(run_hyper_server(
-            routes,
-            new_addr,
-            async { rx.await.ok(); },
-        )));
+        self.handle = Some(tokio::spawn(async move {
+            // SAFETY: set_nonblocking(true) was called before this point.
+            let listener = tokio::net::TcpListener::from_std(std_listener)
+                .expect("from_std: listener must be non-blocking");
+            run_hyper_server_inner(routes, listener, async { rx.await.ok(); }).await;
+        }));
         log::info!("Server rebound to {}", new_addr);
+        Ok(())
     }
 
     /// Registers a new route on the **running** server without any restart.
@@ -1924,7 +1984,7 @@ impl BackgroundServer {
     ///         .onconnect(|| async { reply!(json => Pong { ok: true }) })
     /// );
     ///
-    /// let mut bg = server.serve_managed(([127, 0, 0, 1], 8080));
+    /// let mut bg = server.serve_managed(([127, 0, 0, 1], 8080)).unwrap();
     ///
     /// bg.mechanism(
     ///     ServerMechanism::get("/status")
