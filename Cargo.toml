@@ -1,6 +1,6 @@
 [package]
 name = "toolkit-zero"
-version = "5.1.0"
+version = "5.2.0"
 edition = "2024"
 rust-version = "1.88"
 build = "build.rs"
@@ -62,7 +62,9 @@ toolkit-zero-macros = { path = "toolkit-zero-macros", version = "1.1.0", optiona
 
 [features]
 default = []
-serialization = ["dep:bincode", "dep:base64", "dep:zeroize", "zeroize/derive", "dep:sha2", "dep:rand", "dep:chacha20poly1305", "dep:toolkit-zero-macros", "toolkit-zero-macros/serialization"]
+serialization = ["serialization-seal", "serialization-open"]
+serialization-seal = ["dep:bincode", "dep:base64", "dep:zeroize", "zeroize/derive", "dep:sha2", "dep:rand", "dep:chacha20poly1305", "dep:toolkit-zero-macros", "toolkit-zero-macros/serialization"]
+serialization-open = ["dep:bincode", "dep:base64", "dep:zeroize", "zeroize/derive", "dep:sha2", "dep:rand", "dep:chacha20poly1305", "dep:toolkit-zero-macros", "toolkit-zero-macros/serialization"]
 socket = ["socket-server", "socket-client"]
 socket-server = [
     "serialization",

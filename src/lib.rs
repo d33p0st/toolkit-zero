@@ -616,8 +616,8 @@ pub mod socket;
 #[cfg_attr(docsrs, doc(cfg(any(feature = "location", feature = "location-browser"))))]
 pub mod location;
 
-#[cfg(feature = "serialization")]
-#[cfg_attr(docsrs, doc(cfg(feature = "serialization")))]
+#[cfg(any(feature = "serialization-seal", feature = "serialization-open"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "serialization-seal", feature = "serialization-open"))))]
 pub mod serialization;
 
 #[cfg(any(feature = "encryption", feature = "enc-timelock-keygen-now", feature = "enc-timelock-keygen-input", feature = "enc-timelock-async-keygen-now", feature = "enc-timelock-async-keygen-input"))]

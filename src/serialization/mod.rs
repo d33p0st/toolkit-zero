@@ -51,14 +51,22 @@
 
 mod aead;
 
-pub use aead::{seal, open, SerializationError};
+pub use aead::SerializationError;
+#[cfg(feature = "serialization-seal")]
+pub use aead::seal;
+#[cfg(feature = "serialization-open")]
+pub use aead::open;
 pub use bincode::{Encode, Decode};
 // Re-exported so that `#[serializable]` users don't need a direct `bincode` dep.
 // bincode's proc-macro derive generates code that resolves `bincode::` against
 // this path (via `#[bincode(crate = "::toolkit_zero::serialization::bincode")]`
 // injected by the macro).
+#[doc(hidden)]
 pub use bincode;
-pub use toolkit_zero_macros::{serializable, serialize, deserialize};
+#[cfg(feature = "serialization-seal")]
+pub use toolkit_zero_macros::{serializable, serialize};
+#[cfg(feature = "serialization-open")]
+pub use toolkit_zero_macros::deserialize;
 
 #[cfg(feature = "backend-deps")]
 pub mod backend_deps;

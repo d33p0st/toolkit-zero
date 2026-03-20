@@ -87,6 +87,7 @@ const NONCE_LEN:   usize = 12;
 ///
 /// Returns [`SerializationError::Encode`] if `bincode` cannot serialise the
 /// value.
+#[cfg(feature = "serialization-seal")]
 pub fn seal<T, K>(value: &T, key: Option<K>) -> Result<Vec<u8>, SerializationError>
 where
     T: Encode,
@@ -126,6 +127,7 @@ where
 ///
 /// - [`SerializationError::Cipher`] if authentication fails (wrong key or tampered blob).
 /// - [`SerializationError::Decode`] if the decrypted bytes cannot be interpreted as `T`.
+#[cfg(feature = "serialization-open")]
 pub fn open<T, K>(blob: &[u8], key: Option<K>) -> Result<T, SerializationError>
 where
     T: Decode<()>,
