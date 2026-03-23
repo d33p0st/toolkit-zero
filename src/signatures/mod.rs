@@ -508,4 +508,4 @@ fn clean(s: &str) -> Option<String> {
 }
 
 #[cfg(feature = "backend-deps")]
-pub(crate) mod backend_deps;
+pub mod backend_deps;
