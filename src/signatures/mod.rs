@@ -61,7 +61,7 @@ use sha2::{Digest, Sha256};
 /// altered without physical hardware access and specialised tooling.
 ///
 /// Obtain one by calling [`extract`].
-#[derive(Debug, Clone, crate::serialization::Encode, crate::serialization::Decode)]
+#[derive(Debug, Clone, crate::serialization::Encode, crate::serialization::Decode, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct Signature {
     /// Target OS platform: `"macos"`, `"windows"`, `"linux"`, or `"unknown"`.
     pub platform: String,

@@ -1,6 +1,6 @@
 [package]
 name = "toolkit-zero"
-version = "5.5.0"
+version = "5.6.0"
 edition = "2024"
 rust-version = "1.88"
 build = "build.rs"
@@ -113,7 +113,7 @@ browser = ["dep:iced", "dep:wry", "dep:raw-window-handle", "dep:tokio", "tokio/f
     "dep:reqwest", "reqwest/stream",
     "dep:argon2", "dep:chacha20poly1305", "dep:rand",
     "dep:base64", "dep:serde", "serde/derive", "dep:serde_json", "dep:zeroize"]
-signatures = ["dep:sha2", "serialization"]
+signatures = ["dep:sha2", "serialization", "dep:zeroize", "zeroize/derive"]
 backend-deps = []
 
 [[bin]]
