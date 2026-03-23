@@ -200,7 +200,8 @@ struct SerializeArgs {
     /// The expression to seal (e.g. `my_struct`).
     source: Expr,
     /// Present → file write mode; absent → variable binding mode.
-    path: Option<LitStr>,
+    /// Accepts a string literal, a `String` variable, or any `AsRef<Path>` expression.
+    path: Option<Expr>,
     /// Optional explicit key expression.
     key: Option<Expr>,
 }
@@ -209,7 +210,7 @@ impl Parse for SerializeArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let source: Expr = input.parse()?;
 
-        let mut path: Option<LitStr> = None;
+        let mut path: Option<Expr> = None;
         let mut key: Option<Expr> = None;
 
         while input.peek(Token![,]) {
@@ -222,7 +223,7 @@ impl Parse for SerializeArgs {
             match kw.to_string().as_str() {
                 "path" => {
                     input.parse::<Token![=]>()?;
-                    path = Some(input.parse::<LitStr>()?);
+                    path = Some(input.parse::<Expr>()?);
                 }
                 "key" => {
                     input.parse::<Token![=]>()?;
@@ -233,7 +234,7 @@ impl Parse for SerializeArgs {
                         kw.span(),
                         format!(
                             "#[serialize]: unknown keyword `{other}`. \
-                             Valid keywords: path = \"file.bin\", key = <expr>"
+                             Valid keywords: path = <expr>, key = <expr>"
                         ),
                     ));
                 }
@@ -257,9 +258,9 @@ pub fn expand_serialize(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     match &args.path {
         // ── File write mode ───────────────────────────────────────────────
-        Some(path_lit) => quote! {
+        Some(path_expr) => quote! {
             ::std::fs::write(
-                #path_lit,
+                #path_expr,
                 ::toolkit_zero::serialization::seal(&#source, #key_arg)?,
             )?;
         },
@@ -294,7 +295,8 @@ pub fn expand_serialize(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 enum DeserializeSource {
     Blob(Expr),
-    Path(LitStr),
+    /// Accepts a string literal, a `String` variable, or any `AsRef<Path>` expression.
+    Path(Expr),
 }
 
 struct DeserializeArgs {
@@ -311,7 +313,7 @@ impl Parse for DeserializeArgs {
             if kw == "path" && fork.peek(Token![=]) {
                 input.parse::<Ident>()?; // consume "path"
                 input.parse::<Token![=]>()?;
-                DeserializeSource::Path(input.parse::<LitStr>()?)
+                DeserializeSource::Path(input.parse::<Expr>()?)
             } else {
                 DeserializeSource::Blob(input.parse::<Expr>()?)
             }
@@ -374,8 +376,8 @@ pub fn expand_deserialize(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let bytes_expr = match &args.source {
-        DeserializeSource::Blob(expr) => quote! { &#expr },
-        DeserializeSource::Path(lit)  => quote! { &::std::fs::read(#lit)? },
+        DeserializeSource::Blob(expr)  => quote! { &#expr },
+        DeserializeSource::Path(path_expr) => quote! { &::std::fs::read(#path_expr)? },
     };
 
     quote! {
