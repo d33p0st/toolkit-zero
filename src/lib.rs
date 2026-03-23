@@ -636,7 +636,3 @@ pub mod browser;
 #[cfg(feature = "signatures")]
 #[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
 pub mod signatures;
-
-#[cfg(feature = "zeroize")]
-#[cfg_attr(docsrs, doc(cfg(feature = "zeroize")))]
-pub mod zeroization;
