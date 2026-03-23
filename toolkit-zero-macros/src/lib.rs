@@ -231,7 +231,8 @@
 //! # `#[serializable]` — derive + inject seal/open
 //!
 //! Automatically derives `bincode::Encode + bincode::Decode` on a struct or
-//! enum and injects three methods:
+//! enum and optionally injects `seal` and/or `open` methods controlled by
+//! attribute arguments:
 //!
 //! ```text
 //! fn seal(&self, key: Option<String>) -> Result<Vec<u8>, SerializationError>
@@ -242,23 +243,24 @@
 //! wiping it from memory on drop.  Pass `None` to use the built-in default key.
 //!
 //! Field-level `#[serializable(key = "literal")]` additionally generates
-//! per-field helpers with the key baked in:
+//! per-field seal helpers with the key baked in (only when `SEAL` is active):
 //!
 //! ```text
-//! fn seal_<field>(&self)        -> Result<Vec<u8>, SerializationError>
-//! fn open_<field>(bytes: &[u8]) -> Result<FieldType, SerializationError>
+//! fn seal_<field>(&self) -> Result<Vec<u8>, SerializationError>
 //! ```
 //!
 //! ## Syntax
 //!
 //! ```text
-//! #[serializable]                      // on a struct or enum
-//! struct Foo { … }
+//! #[serializable]              // derive both seal + open (default)
+//! #[serializable(SEAL, OPEN)]  // same as above — explicit
+//! #[serializable(SEAL)]        // derive only seal
+//! #[serializable(OPEN)]        // derive only open
 //!
-//! #[serializable]                      // field annotation inside a struct
+//! #[serializable]              // field annotation inside a struct
 //! struct Bar {
 //!     pub normal: String,
-//!     #[serializable(key = "my-key")]  // generates seal_secret / open_secret
+//!     #[serializable(key = "my-key")]  // generates seal_secret
 //!     pub secret: String,
 //! }
 //! ```
@@ -770,10 +772,19 @@ pub fn request(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Available when the `serialization` feature is enabled.
 /// Re-exported as `toolkit_zero::serialization::serializable`.
 ///
-/// Applies to structs and enums. Named struct fields annotated with
-/// `#[serializable(key = "literal")]` additionally receive `seal_<field>` /
-/// `open_<field>` helpers with the key baked in. Keys are moved in and
-/// wrapped in `Zeroizing<String>`, wiping memory on drop.
+/// By default (no args) both `seal` and `open` are derived. Pass `SEAL`,
+/// `OPEN`, or `SEAL, OPEN` to control which methods are generated:
+///
+/// ```text
+/// #[serializable]             // both
+/// #[serializable(SEAL)]       // only seal
+/// #[serializable(OPEN)]       // only open
+/// #[serializable(SEAL, OPEN)] // both (explicit)
+/// ```
+///
+/// Named struct fields annotated with `#[serializable(key = "literal")]`
+/// additionally receive a `seal_<field>` helper when `SEAL` is active.
+/// Keys are moved in and wrapped in `Zeroizing<String>`, wiping memory on drop.
 ///
 /// Full documentation, expansion details, and examples are in the
 /// [crate-level `#[serializable]` section](self#serializable--derive--inject-sealopen).

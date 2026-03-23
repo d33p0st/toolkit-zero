@@ -14,8 +14,52 @@ use syn::{
 
 // ─── #[serializable] ─────────────────────────────────────────────────────────
 
+struct SerializableArgs {
+    seal: bool,
+    open: bool,
+}
+
+impl Parse for SerializableArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        // No args → derive both
+        if input.is_empty() {
+            return Ok(SerializableArgs { seal: true, open: true });
+        }
+
+        let mut seal = false;
+        let mut open = false;
+
+        loop {
+            let kw: Ident = input.parse()?;
+            match kw.to_string().as_str() {
+                "SEAL" => seal = true,
+                "OPEN" => open = true,
+                other => {
+                    return Err(syn::Error::new(
+                        kw.span(),
+                        format!(
+                            "#[serializable]: unknown argument `{other}`. \
+                             Valid arguments: SEAL, OPEN"
+                        ),
+                    ))
+                }
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+                if input.is_empty() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(SerializableArgs { seal, open })
+    }
+}
+
 pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let _ = attr; // struct-level: no attribute args expected
+    let args = parse_macro_input!(attr as SerializableArgs);
 
     let mut input = parse_macro_input!(item as DeriveInput);
 
@@ -70,36 +114,31 @@ pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream 
                 });
 
                 if let Some(key_lit) = found_key {
-                    let seal_fn = format_ident!("seal_{}", field_name);
+                    if args.seal {
+                        let seal_fn = format_ident!("seal_{}", field_name);
 
-                    per_field_methods.push(quote! {
-                        /// Seal the `#field_name` field with its associated key.
-                        pub fn #seal_fn(
-                            &self,
-                        ) -> ::std::result::Result<
-                            ::std::vec::Vec<u8>,
-                            ::toolkit_zero::serialization::SerializationError,
-                        > {
-                            ::toolkit_zero::serialization::seal(
-                                &self.#field_name,
-                                ::std::option::Option::Some(#key_lit.to_string()),
-                            )
-                        }
-                    });
+                        per_field_methods.push(quote! {
+                            /// Seal the `#field_name` field with its associated key.
+                            pub fn #seal_fn(
+                                &self,
+                            ) -> ::std::result::Result<
+                                ::std::vec::Vec<u8>,
+                                ::toolkit_zero::serialization::SerializationError,
+                            > {
+                                ::toolkit_zero::serialization::seal(
+                                    &self.#field_name,
+                                    ::std::option::Option::Some(#key_lit.to_string()),
+                                )
+                            }
+                        });
+                    }
                 }
             }
         }
     }
 
-    quote! {
-        #[derive(
-            ::toolkit_zero::serialization::Encode,
-            ::toolkit_zero::serialization::Decode,
-        )]
-        #[bincode(crate = "::toolkit_zero::serialization::bincode")]
-        #input
-
-        impl #impl_generics_ts #name #ty_generics_ts #where_clause_ts {
+    let seal_method = if args.seal {
+        quote! {
             /// Encode and seal this value into an encrypted byte blob.
             ///
             /// Pass `None` to use the default key (`"serialization/deserialization"`),
@@ -113,7 +152,42 @@ pub fn expand_serializable(attr: TokenStream, item: TokenStream) -> TokenStream 
             > {
                 ::toolkit_zero::serialization::seal(self, key)
             }
+        }
+    } else {
+        quote! {}
+    };
 
+    let open_method = if args.open {
+        quote! {
+            /// Decode and open an encrypted byte blob back into this type.
+            ///
+            /// Pass `None` to use the default key (`"serialization/deserialization"`),
+            /// or `Some(key)` for a custom key.
+            pub fn open(
+                bytes: &[u8],
+                key: ::std::option::Option<::std::string::String>,
+            ) -> ::std::result::Result<
+                Self,
+                ::toolkit_zero::serialization::SerializationError,
+            > {
+                ::toolkit_zero::serialization::open::<Self, ::std::string::String>(bytes, key)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        #[derive(
+            ::toolkit_zero::serialization::Encode,
+            ::toolkit_zero::serialization::Decode,
+        )]
+        #[bincode(crate = "::toolkit_zero::serialization::bincode")]
+        #input
+
+        impl #impl_generics_ts #name #ty_generics_ts #where_clause_ts {
+            #seal_method
+            #open_method
             #(#per_field_methods)*
         }
     }
