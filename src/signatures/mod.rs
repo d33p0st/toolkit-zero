@@ -61,10 +61,10 @@ use sha2::{Digest, Sha256};
 /// altered without physical hardware access and specialised tooling.
 ///
 /// Obtain one by calling [`extract`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, crate::serialization::Encode, crate::serialization::Decode)]
 pub struct Signature {
     /// Target OS platform: `"macos"`, `"windows"`, `"linux"`, or `"unknown"`.
-    pub platform: &'static str,
+    pub platform: String,
 
     /// Factory system serial number burned into BIOS/UEFI firmware or IOKit.
     ///
@@ -185,7 +185,7 @@ impl Signature {
         };
 
         Some(Signature {
-            platform,
+            platform: platform.to_string(),
             system_serial: to_opt(fields[1]),
             hardware_uuid: to_opt(fields[2]),
             board_serial:  to_opt(fields[3]),
@@ -265,7 +265,7 @@ fn extract_impl() -> Signature {
     let fingerprint = fingerprint("macos", &system_serial, &hardware_uuid, &None, &disk_serial);
 
     Signature {
-        platform: "macos",
+        platform: "macos".to_string(),
         system_serial,
         hardware_uuid,
         // Apple integrates board + system; there is no separate board serial.
@@ -294,7 +294,7 @@ fn extract_impl() -> Signature {
     let fingerprint = fingerprint("windows", &system_serial, &hardware_uuid, &board_serial, &disk_serial);
 
     Signature {
-        platform: "windows",
+        platform: "windows".to_string(),
         system_serial,
         hardware_uuid,
         board_serial,
@@ -316,7 +316,7 @@ fn extract_impl() -> Signature {
     let fingerprint = fingerprint("linux", &system_serial, &hardware_uuid, &board_serial, &disk_serial);
 
     Signature {
-        platform: "linux",
+        platform: "linux".to_string(),
         system_serial,
         hardware_uuid,
         board_serial,
@@ -329,7 +329,7 @@ fn extract_impl() -> Signature {
 fn extract_impl() -> Signature {
     let fp = fingerprint("unknown", &None, &None, &None, &None);
     Signature {
-        platform: "unknown",
+        platform: "unknown".to_string(),
         system_serial: None,
         hardware_uuid: None,
         board_serial:  None,
