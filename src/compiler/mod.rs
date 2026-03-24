@@ -9,21 +9,20 @@
 //! # Quick start
 //!
 //! ```rust,ignore
-//! use toolkit_zero::compiler::{compile, Input};
+//! use toolkit_zero::compiler::{compile, Input, ToolchainChannel};
 //!
-//! // Compile a directory that already contains a Cargo project (release, live output)
-//! // Returns Ok(None) because output is streamed, not captured.
-//! let _ = compile(Input::Dir("/path/to/my/project"), true, true, true).unwrap();
+//! // Compile a directory (stable, release, live output, with progress)
+//! let _ = compile(Input::Dir("/path/to/my/project"), true, true, true, None, ToolchainChannel::Stable).unwrap();
 //!
 //! // Compile a single .rs file in dev mode, capture output silently
 //! if let Some(out) = compile(Input::File {
 //!     path: "/tmp/hello.rs".into(),
 //!     deps: vec![],
-//! }, false, false, true).unwrap() {
+//! }, false, false, true, None, ToolchainChannel::Stable).unwrap() {
 //!     println!("{}", out.stdout);
 //! }
 //!
-//! // Compile a single .rs file with dependencies (release, live output)
+//! // Compile a single .rs file with dependencies (nightly, release, live output)
 //! use toolkit_zero::compiler::Dependency;
 //! let _ = compile(Input::File {
 //!     path: "/tmp/hello.rs".into(),
@@ -31,7 +30,7 @@
 //!         Dependency::new("serde").version("1").feature("derive"),
 //!         Dependency::new("tokio").version("1").feature("full"),
 //!     ],
-//! }, true, true, true).unwrap();
+//! }, true, true, true, None, ToolchainChannel::Nightly).unwrap();
 //! ```
 
 #[cfg(target_arch = "wasm32")]
@@ -43,15 +42,40 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-// ── Embedded toolchain ────────────────────────────────────────────────────────
+// ── Embedded toolchains ────────────────────────────────────────────────────────────────
 
-/// The toolchain tarball for the current target, embedded at compile time.
-///
-/// Produced by `build.rs` from `assets/toolchains/<TARGET>/rust-*.tar.xz`.
-/// Not available on `wasm32-*` targets (no pre-built toolchain bundle exists).
+/// The stable toolchain tarball for the current target, embedded at compile time.
 #[cfg(not(target_arch = "wasm32"))]
-static TOOLCHAIN_TARBALL: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/toolchain.tar.xz"));
+static TOOLCHAIN_STABLE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/toolchain-stable.tar.xz"));
+
+/// The nightly toolchain tarball for the current target, embedded at compile time.
+#[cfg(not(target_arch = "wasm32"))]
+static TOOLCHAIN_NIGHTLY: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/toolchain-nightly.tar.xz"));
+
+// ── Toolchain channel ──────────────────────────────────────────────────────────────
+
+/// Which Rust toolchain release channel to use for compilation.
+///
+/// Both `stable` and `nightly` tarballs are embedded at build time.
+/// Defaults to [`ToolchainChannel::Stable`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolchainChannel {
+    #[default]
+    Stable,
+    Nightly,
+}
+
+impl ToolchainChannel {
+    /// The manifest channel name used in `channel-rust-<name>.toml`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable  => "stable",
+            Self::Nightly => "nightly",
+        }
+    }
+}
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -294,6 +318,78 @@ impl From<io::Error> for CompileError {
     fn from(e: io::Error) -> Self { Self::Io(e) }
 }
 
+// ── Cross-compilation targets ─────────────────────────────────────────────────
+
+/// Simple ALL-CAPS name for a cross-compilation target.
+///
+/// Pass one of these to [`compile`] via the `cross_target` parameter to
+/// download the matching `rust-std` component at runtime and compile for that
+/// target.  The host toolchain (rustc + cargo) comes from the embedded tarball;
+/// only the standard library for the new target is fetched from
+/// `static.rust-lang.org` and merged into the sysroot.
+///
+/// The `rust-std` tarball for the selected target is cached in
+/// `$CARGO_HOME/toolchain-cache/<triple>/rust-std.tar.xz` so the network
+/// request happens only once per target.
+///
+/// # Linker note
+///
+/// `rustc` requires a linker for the target to be available on `PATH`
+/// (e.g. `aarch64-linux-gnu-gcc` for `LINUX_ARM64`).  The only exception is
+/// `WASM` / `WASM_WASI` which use the built-in LLD bundled inside the
+/// embedded rustc binary.
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum CrossTarget {
+    #[value(name = "LINUX_X64")]    LinuxX64,
+    #[value(name = "LINUX_X86")]    LinuxX86,
+    #[value(name = "LINUX_ARM64")]  LinuxArm64,
+    #[value(name = "LINUX_ARM")]    LinuxArm,
+    #[value(name = "LINUX_MUSL_X64")]   LinuxMuslX64,
+    #[value(name = "LINUX_MUSL_ARM64")] LinuxMuslArm64,
+    #[value(name = "WIN_X64")]      WinX64,
+    #[value(name = "WIN_X86")]      WinX86,
+    #[value(name = "WIN_X64_GNU")]  WinX64Gnu,
+    #[value(name = "WIN_ARM64")]    WinArm64,
+    #[value(name = "MAC_X64")]      MacX64,
+    #[value(name = "MAC_ARM64")]    MacArm64,
+    #[value(name = "WASM")]         Wasm,
+    #[value(name = "WASM_WASI")]    WasmWasi,
+    #[value(name = "ANDROID_ARM64")] AndroidArm64,
+    #[value(name = "ANDROID_X64")]  AndroidX64,
+    #[value(name = "ANDROID_ARM")]  AndroidArm,
+    #[value(name = "ANDROID_X86")]  AndroidX86,
+    #[value(name = "FREEBSD_X64")] FreebsdX64,
+    #[value(name = "IOS_ARM64")]    IosArm64,
+}
+
+impl CrossTarget {
+    /// The actual Rust target triple string used by rustc/cargo.
+    pub fn triple(&self) -> &'static str {
+        match self {
+            Self::LinuxX64       => "x86_64-unknown-linux-gnu",
+            Self::LinuxX86       => "i686-unknown-linux-gnu",
+            Self::LinuxArm64     => "aarch64-unknown-linux-gnu",
+            Self::LinuxArm       => "armv7-unknown-linux-gnueabihf",
+            Self::LinuxMuslX64   => "x86_64-unknown-linux-musl",
+            Self::LinuxMuslArm64 => "aarch64-unknown-linux-musl",
+            Self::WinX64         => "x86_64-pc-windows-msvc",
+            Self::WinX86         => "i686-pc-windows-msvc",
+            Self::WinX64Gnu      => "x86_64-pc-windows-gnu",
+            Self::WinArm64       => "aarch64-pc-windows-msvc",
+            Self::MacX64         => "x86_64-apple-darwin",
+            Self::MacArm64       => "aarch64-apple-darwin",
+            Self::Wasm           => "wasm32-unknown-unknown",
+            Self::WasmWasi       => "wasm32-wasip1",
+            Self::AndroidArm64   => "aarch64-linux-android",
+            Self::AndroidX64     => "x86_64-linux-android",
+            Self::AndroidArm     => "armv7-linux-androideabi",
+            Self::AndroidX86     => "i686-linux-android",
+            Self::FreebsdX64     => "x86_64-unknown-freebsd",
+            Self::IosArm64       => "aarch64-apple-ios",
+        }
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Compile a Rust project using the embedded toolchain.
@@ -314,12 +410,20 @@ impl From<io::Error> for CompileError {
 /// since output is not captured. When `false`, output is captured silently
 /// and returned as `Ok(Some(`[`CompileOutput`]`))` on success.
 ///
+/// Set `show_progress` to `true` to display sequential terminal progress bars
+/// (decompress → compile → cleanup). Always shown for the cross-std download
+/// step regardless of this flag.
+///
+/// Pass a [`CrossTarget`] to cross-compile for a different platform. The
+/// matching `rust-std` is downloaded and cached on first use.
+///
 /// The *project* tempdir (for [`Input::File`]) is *also* cleaned up after the
 /// build regardless of success.
 ///
 /// # Errors
 ///
-/// Returns [`CompileError::Io`] for filesystem failures, [`CompileError::InvalidProject`]
+/// Returns [`CompileError::Io`] for filesystem/network failures,
+/// [`CompileError::InvalidProject`]
 /// when the supplied directory lacks `Cargo.toml` or `src/`, and
 /// [`CompileError::BuildFailed`] when cargo exits non-zero.
 ///
@@ -327,10 +431,27 @@ impl From<io::Error> for CompileError {
 ///
 /// Not available on `wasm32-*` targets (no pre-built toolchain is embedded).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn compile(input: Input, release: bool, live_output: bool, show_progress: bool) -> Result<Option<CompileOutput>, CompileError> {
+pub fn compile(input: Input, release: bool, live_output: bool, show_progress: bool, cross_target: Option<CrossTarget>, channel: ToolchainChannel) -> Result<Option<CompileOutput>, CompileError> {
+    // ── Step 0: validate input before the expensive decompression ─────────────
+    match &input {
+        Input::Dir(p) => validate_project(p)?,
+        Input::File { path, .. } => {
+            if !path.exists() {
+                return Err(CompileError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{}: file not found", path.display()),
+                )));
+            }
+        }
+    }
+
     // ── Step 1: extract the embedded toolchain into a temp dir ────────────────
+    let tarball = match channel {
+        ToolchainChannel::Stable  => TOOLCHAIN_STABLE,
+        ToolchainChannel::Nightly => TOOLCHAIN_NIGHTLY,
+    };
     let toolchain_tmp = tempdir()?;
-    extract_tarball(TOOLCHAIN_TARBALL, toolchain_tmp.path(), show_progress)?;
+    extract_tarball(tarball, toolchain_tmp.path(), show_progress, "toolchain")?;
 
     // The tarball unpacks into a single top-level directory
     // (e.g. rust-1.94.0-x86_64-unknown-linux-gnu/).  Find it.
@@ -349,6 +470,11 @@ pub fn compile(input: Input, release: bool, live_output: bool, show_progress: bo
     // subdirectories; rustc only looks inside its own lib/rustlib/ tree.
     merge_std_into_sysroot(&toolchain_root)?;
 
+    // ── Step 1b: fetch + merge cross-std (when --target is used) ─────────────
+    if let Some(ref ct) = cross_target {
+        fetch_cross_std(ct.triple(), &toolchain_root, show_progress, channel)?;
+    };
+
     let path_with_toolchain = format!(
         "{}:{}:{}",
         toolchain_root.join("rustc/bin").display(),
@@ -360,7 +486,7 @@ pub fn compile(input: Input, release: bool, live_output: bool, show_progress: bo
     // For File inputs we create a temp project dir and remember it for cleanup.
     let (project_dir, _project_tmp) = match &input {
         Input::Dir(p) => {
-            validate_project(p)?;
+
             (p.clone(), None::<TempDir>)
         }
         Input::File { path, deps } => {
@@ -375,6 +501,9 @@ pub fn compile(input: Input, release: bool, live_output: bool, show_progress: bo
     cmd.arg("build");
     if release {
         cmd.arg("--release");
+    }
+    if let Some(ref ct) = cross_target {
+        cmd.arg("--target").arg(ct.triple());
     }
     cmd.env("RUSTC", &rustc_bin)
         .env("PATH", &path_with_toolchain)
@@ -493,20 +622,21 @@ fn tempdir() -> io::Result<TempDir> {
 
 /// Stream-decompress and unpack a `.tar.xz` byte slice into `dest`.
 /// When `show_progress` is `true`, displays a terminal progress bar while
-/// reading the compressed stream.
+/// reading the compressed stream. `label` appears in the bar message.
 #[cfg(not(target_arch = "wasm32"))]
-fn extract_tarball(bytes: &[u8], dest: &Path, show_progress: bool) -> Result<(), CompileError> {
+fn extract_tarball(bytes: &[u8], dest: &Path, show_progress: bool, label: &str) -> Result<(), CompileError> {
     if show_progress {
         use indicatif::{ProgressBar, ProgressStyle};
         let total = bytes.len() as u64;
         let pb = ProgressBar::new(total);
         pb.set_style(
             ProgressStyle::with_template(
-                "{spinner:.cyan} decompressing toolchain  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"
+                "{spinner:.cyan} {msg}  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"
             )
             .unwrap()
             .progress_chars("=>-"),
         );
+        pb.set_message(format!("decompressing {label}"));
 
         // Wrap the raw byte slice so reads advance the progress bar.
         let tracked = pb.wrap_read(bytes);
@@ -514,11 +644,28 @@ fn extract_tarball(bytes: &[u8], dest: &Path, show_progress: bool) -> Result<(),
         let mut archive = tar::Archive::new(xz);
         archive.unpack(dest).map_err(CompileError::Io)?;
 
-        pb.finish_with_message("decompressed toolchain");
+        pb.finish_with_message(format!("decompressed {label}"));
     } else {
         let xz = xz2::read::XzDecoder::new(bytes);
         let mut archive = tar::Archive::new(xz);
         archive.unpack(dest).map_err(CompileError::Io)?;
+    }
+    Ok(())
+}
+
+/// Copy every `rust-std-*/lib/rustlib/` subtree found directly inside `src_root`
+/// into `dest_rustlib`, merging the two directory trees.
+#[cfg(not(target_arch = "wasm32"))]
+fn merge_std_components(src_root: &Path, dest_rustlib: &Path) -> Result<(), CompileError> {
+    for entry in std::fs::read_dir(src_root).map_err(CompileError::Io)? {
+        let entry = entry.map_err(CompileError::Io)?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("rust-std-") {
+            let std_rustlib = entry.path().join("lib/rustlib");
+            if std_rustlib.exists() {
+                copy_dir_merge(&std_rustlib, dest_rustlib).map_err(CompileError::Io)?;
+            }
+        }
     }
     Ok(())
 }
@@ -533,17 +680,28 @@ fn extract_tarball(bytes: &[u8], dest: &Path, show_progress: bool) -> Result<(),
 #[cfg(not(target_arch = "wasm32"))]
 fn merge_std_into_sysroot(toolchain_root: &Path) -> Result<(), CompileError> {
     let rustc_rustlib = toolchain_root.join("rustc/lib/rustlib");
-    for entry in std::fs::read_dir(toolchain_root).map_err(CompileError::Io)? {
-        let entry = entry.map_err(CompileError::Io)?;
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with("rust-std-") {
-            let std_rustlib = entry.path().join("lib/rustlib");
-            if std_rustlib.exists() {
-                copy_dir_merge(&std_rustlib, &rustc_rustlib).map_err(CompileError::Io)?;
-            }
-        }
-    }
-    Ok(())
+    merge_std_components(toolchain_root, &rustc_rustlib)
+}
+
+/// Extract a cross-std tarball in `cross_tmp` and merge its `lib/rustlib/`
+/// contents into the live toolchain sysroot at `toolchain_root/rustc/lib/rustlib/`.
+///
+/// The cross-std tarball has the structure:
+/// ```text
+/// rust-std-<version>-<triple>/
+///   rust-std-<triple>/
+///     lib/rustlib/<triple>/lib/*.rlib  …
+/// ```
+/// We navigate past the outer version directory and merge from there.
+#[cfg(not(target_arch = "wasm32"))]
+fn merge_cross_std(cross_tmp: &Path, toolchain_root: &Path) -> Result<(), CompileError> {
+    let outer = find_single_subdir(cross_tmp)
+        .ok_or_else(|| CompileError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "cross-std tarball has unexpected structure (no single top-level dir)",
+        )))?;
+    let dest_rustlib = toolchain_root.join("rustc/lib/rustlib");
+    merge_std_components(&outer, &dest_rustlib)
 }
 
 /// Recursively copy the contents of `src` into `dst`, merging directories
@@ -560,6 +718,160 @@ fn copy_dir_merge(src: &Path, dst: &Path) -> io::Result<()> {
             std::fs::copy(entry.path(), &dst_path)?;
         }
     }
+    Ok(())
+}
+
+/// Persistent cache directory for the cross-std tarball of `triple`.
+/// `$CARGO_HOME/toolchain-cache/<triple>/<channel>/rust-std.tar.xz`
+#[cfg(not(target_arch = "wasm32"))]
+fn cross_std_cache_dir(triple: &str, channel: &str) -> PathBuf {
+    let cargo_home = std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".cargo".to_string());
+            PathBuf::from(home).join(".cargo")
+        });
+    cargo_home.join("toolchain-cache").join(triple).join(channel)
+}
+
+/// Finds the `xz_url` and `xz_hash` values from `section` (e.g.
+/// `[pkg.rust-std.target.aarch64-unknown-linux-gnu]`) in the manifest text.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_manifest_section_rt(text: &str, section: &str) -> Option<(String, String)> {
+    let mut in_section = false;
+    let mut xz_url: Option<String> = None;
+    let mut xz_hash: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            if line == section { in_section = true; }
+            else if in_section { break; }
+            continue;
+        }
+        if !in_section { continue; }
+        if let Some(rest) = line.strip_prefix("xz_url = \"") {
+            xz_url = Some(rest.trim_end_matches('"').to_string());
+        } else if let Some(rest) = line.strip_prefix("xz_hash = \"") {
+            xz_hash = Some(rest.trim_end_matches('"').to_string());
+        }
+        if xz_url.is_some() && xz_hash.is_some() { break; }
+    }
+    Some((xz_url?, xz_hash?))
+}
+
+/// Download the `rust-std-<triple>` component, cache it, and merge its
+/// `lib/rustlib/` tree into the live toolchain sysroot.
+///
+/// A progress bar is always shown regardless of the `show_progress` flag on
+/// the parent [`compile`] call.
+#[cfg(not(target_arch = "wasm32"))]
+fn fetch_cross_std(triple: &str, toolchain_root: &Path, _show_progress: bool, channel: ToolchainChannel) -> Result<(), CompileError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    let cache_dir  = cross_std_cache_dir(triple, channel.as_str());
+    let cache_file = cache_dir.join("rust-std.tar.xz");
+
+    let tarball_bytes: Vec<u8> = if cache_file.exists() {
+        std::fs::read(&cache_file).map_err(CompileError::Io)?
+    } else {
+        // ── 1. Show download spinner ───────────────────────────────────────────
+        let dl_pb = ProgressBar::new_spinner();
+        dl_pb.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap()
+                .tick_strings(&["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]),
+        );
+        let manifest_url = format!("https://static.rust-lang.org/dist/channel-rust-{}.toml", channel.as_str());
+        dl_pb.set_message(format!("fetching manifest for {triple}…"));
+        dl_pb.tick();
+        dl_pb.enable_steady_tick(std::time::Duration::from_millis(80));
+
+        // ── 2. Fetch manifest (stable or nightly) ──────────────────────────────
+        let mut manifest_bytes = Vec::new();
+        ureq::get(&manifest_url)
+            .call()
+            .map_err(|e| CompileError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?
+            .into_reader()
+            .read_to_end(&mut manifest_bytes)
+            .map_err(CompileError::Io)?;
+        let manifest = String::from_utf8(manifest_bytes)
+            .map_err(|e| CompileError::Io(io::Error::new(io::ErrorKind::InvalidData, e.to_string())))?;
+
+        // ── 3. Parse xz_url + xz_hash ─────────────────────────────────────────
+        let section = format!("[pkg.rust-std.target.{triple}]");
+        let (xz_url, xz_hash) = parse_manifest_section_rt(&manifest, &section)
+            .ok_or_else(|| CompileError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("target '{triple}' has no rust-std entry in the {} manifest", channel.as_str()),
+            )))?;
+
+        // ── 4. Download tarball ─────────────────────────────────────────────
+        dl_pb.set_message(format!("downloading rust-std for {triple}…"));
+        let response = ureq::get(&xz_url)
+            .call()
+            .map_err(|e| CompileError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+
+        // Upgrade to a proper bytes/total bar if Content-Length is known.
+        let total_opt: Option<u64> = response
+            .header("content-length")
+            .and_then(|v| v.parse().ok());
+        dl_pb.finish_and_clear();
+
+        let dl_pb2 = if let Some(total) = total_opt {
+            let pb = ProgressBar::new(total);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.cyan} {msg}  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"
+                )
+                .unwrap()
+                .progress_chars("=>-"),
+            );
+            pb.set_message(format!("downloading rust-std for {triple}"));
+            pb
+        } else {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(
+                ProgressStyle::with_template("{spinner:.cyan} {msg} {bytes}")
+                    .unwrap()
+                    .tick_strings(&["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]),
+            );
+            pb.set_message(format!("downloading rust-std for {triple}…"));
+            pb
+        };
+        dl_pb2.tick();
+        dl_pb2.enable_steady_tick(std::time::Duration::from_millis(80));
+        let mut reader = dl_pb2.wrap_read(response.into_reader());
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map_err(CompileError::Io)?;
+        dl_pb2.finish_with_message(format!("downloaded rust-std for {triple}"));
+
+        // ── 5. Verify SHA-256 ───────────────────────────────────────────────
+        let expected = xz_hash.strip_prefix("sha256:").unwrap_or(&xz_hash).to_string();
+        let hash = Sha256::digest(&bytes);
+        let actual: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        if actual != expected {
+            return Err(CompileError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("SHA-256 mismatch for rust-std-{triple}: expected {expected}, got {actual}"),
+            )));
+        }
+
+        // ── 6. Cache ─────────────────────────────────────────────────────────
+        std::fs::create_dir_all(&cache_dir).map_err(CompileError::Io)?;
+        std::fs::write(&cache_file, &bytes).map_err(CompileError::Io)?;
+
+        bytes
+    };
+
+    // ── 7. Extract and merge into sysroot ──────────────────────────────────
+    let cross_tmp = tempdir()?;
+    extract_tarball(&tarball_bytes, cross_tmp.path(), true, &format!("rust-std for {triple}"))?;
+    merge_cross_std(cross_tmp.path(), toolchain_root)?;
+
     Ok(())
 }
 

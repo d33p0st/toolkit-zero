@@ -61,7 +61,8 @@ fn main() {
     // The tarball is fetched from static.rust-lang.org on first use and cached
     // in $CARGO_HOME/toolchain-cache/<TARGET>/toolchain.tar.xz so that
     // subsequent builds don't re-download.  Copying it into $OUT_DIR makes it
-    // available for include_bytes!(concat!(env!("OUT_DIR"), "/toolchain.tar.xz")).
+    // available for include_bytes!(concat!(env!("OUT_DIR"), "/toolchain-stable.tar.xz"))
+    // and the nightly equivalent.
     let compiler_enabled = std::env::var("CARGO_FEATURE_COMPILER").is_ok();
     if compiler_enabled {
         let target = std::env::var("TARGET").unwrap();
@@ -69,21 +70,23 @@ fn main() {
         // wasm32-* targets have no pre-built rustc/cargo toolchain bundle — skip.
         if !target.starts_with("wasm32-") {
             let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-            let cache_dir = toolchain_cache_dir(&target);
-            let cached = cache_dir.join("toolchain.tar.xz");
 
-            // Re-run this build script only when the cached tarball changes
-            // (e.g. user manually deletes it to force a re-download).
-            println!("cargo:rerun-if-changed={}", cached.display());
+            for channel in &["stable", "nightly"] {
+                let cache_dir = toolchain_cache_dir(&target, channel);
+                let cached    = cache_dir.join("toolchain.tar.xz");
 
-            if !cached.exists() {
-                std::fs::create_dir_all(&cache_dir)
-                    .expect("compiler feature: failed to create toolchain cache dir");
-                download_toolchain(&target, &cached);
+                // Re-run this build script only when the cached tarball changes.
+                println!("cargo:rerun-if-changed={}", cached.display());
+
+                if !cached.exists() {
+                    std::fs::create_dir_all(&cache_dir)
+                        .expect("compiler feature: failed to create toolchain cache dir");
+                    download_toolchain(channel, &target, &cached);
+                }
+
+                std::fs::copy(&cached, out_dir.join(format!("toolchain-{channel}.tar.xz")))
+                    .unwrap_or_else(|e| panic!("compiler feature: failed to copy {channel} toolchain to OUT_DIR: {e}"));
             }
-
-            std::fs::copy(&cached, out_dir.join("toolchain.tar.xz"))
-                .expect("compiler feature: failed to copy toolchain tarball to OUT_DIR");
         }
     }
 
@@ -156,11 +159,10 @@ fn main() {
 
 // ── Compiler feature helpers ──────────────────────────────────────────────────
 
-/// Returns the persistent cache directory for the toolchain tarball.
+/// Returns the persistent cache directory for `channel` toolchain tarball.
 ///
-/// Uses `$CARGO_HOME/toolchain-cache/<target>/` — writable on all platforms
-/// and shared across workspaces so the tarball is only ever downloaded once.
-fn toolchain_cache_dir(target: &str) -> PathBuf {
+/// `$CARGO_HOME/toolchain-cache/<target>/<channel>/`
+fn toolchain_cache_dir(target: &str, channel: &str) -> PathBuf {
     let cargo_home = std::env::var("CARGO_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -170,24 +172,25 @@ fn toolchain_cache_dir(target: &str) -> PathBuf {
                 .expect("neither CARGO_HOME, HOME, nor USERPROFILE is set");
             PathBuf::from(home).join(".cargo")
         });
-    cargo_home.join("toolchain-cache").join(target)
+    cargo_home.join("toolchain-cache").join(target).join(channel)
 }
 
-/// Downloads the stable Rust toolchain tarball for `target` and writes it to
-/// `dest`, verifying its SHA-256 hash against the official manifest.
-fn download_toolchain(target: &str, dest: &Path) {
+/// Downloads the Rust `channel` toolchain tarball for `target` and writes it
+/// to `dest`, verifying its SHA-256 hash against the official manifest.
+fn download_toolchain(channel: &str, target: &str, dest: &Path) {
     use std::io::Read;
 
-    eprintln!("compiler feature: fetching channel-rust-stable.toml …");
+    let manifest_url = format!("https://static.rust-lang.org/dist/channel-rust-{channel}.toml");
+    eprintln!("compiler feature: fetching {manifest_url} …");
 
     // ── Step 1: fetch the release manifest ───────────────────────────────────
     let mut manifest_bytes = Vec::new();
-    ureq::get("https://static.rust-lang.org/dist/channel-rust-stable.toml")
+    ureq::get(&manifest_url)
         .call()
-        .expect("compiler feature: failed to fetch channel-rust-stable.toml")
+        .unwrap_or_else(|e| panic!("compiler feature: failed to fetch {manifest_url}: {e}"))
         .into_reader()
         .read_to_end(&mut manifest_bytes)
-        .expect("compiler feature: failed to read manifest body");
+        .unwrap_or_else(|e| panic!("compiler feature: failed to read {channel} manifest body: {e}"));
     let manifest = String::from_utf8(manifest_bytes)
         .expect("compiler feature: manifest is not valid UTF-8");
 
@@ -195,7 +198,7 @@ fn download_toolchain(target: &str, dest: &Path) {
     let section = format!("[pkg.rust.target.{}]", target);
     let (xz_url, xz_hash) = parse_manifest_section(&manifest, &section)
         .unwrap_or_else(|| panic!(
-            "compiler feature: target '{target}' not found in channel-rust-stable.toml.\n\
+            "compiler feature: target '{target}' not found in channel-rust-{channel}.toml.\n\
              This target may not have a pre-built toolchain bundle."
         ));
 
@@ -204,7 +207,7 @@ fn download_toolchain(target: &str, dest: &Path) {
     let mut tarball_bytes = Vec::new();
     ureq::get(&xz_url)
         .call()
-        .expect("compiler feature: failed to download toolchain tarball")
+        .unwrap_or_else(|e| panic!("compiler feature: failed to download {channel} toolchain tarball: {e}"))
         .into_reader()
         .read_to_end(&mut tarball_bytes)
         .expect("compiler feature: failed to read toolchain tarball body");

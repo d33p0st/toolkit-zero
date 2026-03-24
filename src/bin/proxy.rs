@@ -4,36 +4,55 @@
 //! # Usage
 //!
 //! ```text
-//! rzc --dir <path>  [--release] [--verbose]
-//! rzc --path <file> [--dep <name>[@<version>][:<feat1,feat2>] ...] [--release] [--verbose]
+//! rzc --dir <path>  [--release] [--verbose] [--stable|--nightly] [--target <TARGET>]
+//! rzc --path <file> [--dep <SPEC>...] [--release] [--verbose] [--stable|--nightly] [--target <TARGET>]
 //! ```
 //!
 //! # Examples
 //!
 //! ```text
-//! # Compile an existing Cargo project in release mode
+//! # Compile an existing Cargo project in release mode (stable, default)
 //! rzc --dir ./my-project --release
 //!
-//! # Compile a single .rs file with dependencies, streaming output
+//! # Compile with the nightly toolchain
+//! rzc --dir ./my-project --nightly
+//!
+//! # Compile a single .rs file with dependencies, streaming cargo output
 //! rzc --path ./hello.rs --dep serde@1:derive --dep tokio@1:full --release --verbose
+//!
+//! # Cross-compile for Linux ARM64 (requires aarch64-linux-gnu-gcc on PATH)
+//! rzc --dir ./my-project --target LINUX_ARM64
+//!
+//! # Cross-compile a single file to WebAssembly (no external linker needed)
+//! rzc --path ./lib.rs --target WASM
 //! ```
 
 use std::path::PathBuf;
 
 use clap::Parser;
-use toolkit_zero::compiler::{compile, Dependency, Input};
+use toolkit_zero::compiler::{compile, CrossTarget, Dependency, Input, ToolchainChannel};
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
-/// Compile a Rust project using the embedded stable toolchain.
+/// Compile a Rust project using the embedded Rust toolchain.
+///
+/// Both stable and nightly toolchains are embedded at build time.
+/// Use --stable (default) or --nightly to select the channel.
+/// Use --target to cross-compile; the matching rust-std is downloaded and
+/// cached on first use.
 #[derive(Parser)]
 #[command(name = "rzc", author, version, about, long_about = None)]
 struct Cli {
     /// Path to an existing Cargo project directory.
+    ///
+    /// Mutually exclusive with --path.
     #[arg(long, conflicts_with = "path", value_name = "DIR")]
     dir: Option<PathBuf>,
 
-    /// Path to a single `.rs` file to compile (generates a temporary Cargo project).
+    /// Path to a single `.rs` file to compile.
+    ///
+    /// A temporary Cargo project is generated around it. Use --dep to inject
+    /// dependencies. Mutually exclusive with --dir.
     #[arg(long, conflicts_with = "dir", value_name = "FILE")]
     path: Option<PathBuf>,
 
@@ -54,16 +73,48 @@ struct Cli {
     #[arg(long = "dep", value_name = "SPEC", requires = "path")]
     deps: Vec<String>,
 
-    /// Compile with the release profile (`--release`).
+    /// Compile with the release profile.
     #[arg(long)]
     release: bool,
 
-    /// Stream cargo output live to the terminal.
+    /// Stream cargo output live to the terminal (verbose mode).
     ///
-    /// Without this flag a progress spinner is shown instead and the full
-    /// stdout/stderr is printed after the build finishes.
+    /// Without this flag, cargo output is suppressed and sequential progress
+    /// bars are shown instead (decompress → compile → cleanup). On error,
+    /// cargo's stdout/stderr is printed regardless.
     #[arg(long)]
     verbose: bool,
+
+    /// Cross-compile for a different target platform.
+    ///
+    /// The matching rust-std component is downloaded from static.rust-lang.org
+    /// and cached in ~/.cargo/toolchain-cache/<triple>/<channel>/rust-std.tar.xz
+    /// on first use. Subsequent builds use the cache.
+    ///
+    /// Most targets require a system linker on PATH (e.g. aarch64-linux-gnu-gcc
+    /// for LINUX_ARM64). WASM and WASM_WASI use the built-in LLD and need no
+    /// external linker.
+    ///
+    /// Available targets:
+    ///   LINUX_X64, LINUX_X86, LINUX_ARM64, LINUX_ARM
+    ///   LINUX_MUSL_X64, LINUX_MUSL_ARM64
+    ///   WIN_X64, WIN_X86, WIN_X64_GNU, WIN_ARM64
+    ///   MAC_X64, MAC_ARM64
+    ///   WASM, WASM_WASI
+    ///   ANDROID_ARM64, ANDROID_X64, ANDROID_ARM, ANDROID_X86
+    ///   FREEBSD_X64, IOS_ARM64
+    #[arg(long, value_name = "TARGET")]
+    target: Option<CrossTarget>,
+
+    /// Use the stable toolchain (default when neither --stable nor --nightly is given).
+    #[arg(long, conflicts_with = "nightly")]
+    stable: bool,
+
+    /// Use the nightly toolchain instead of stable.
+    ///
+    /// Mutually exclusive with --stable.
+    #[arg(long, conflicts_with = "stable")]
+    nightly: bool,
 }
 
 // ── Dependency spec parser ────────────────────────────────────────────────────
@@ -208,10 +259,17 @@ fn main() {
         std::process::exit(1);
     };
 
+    // ── Resolve toolchain channel ────────────────────────────────────────────────
+    let channel = if cli.nightly {
+        ToolchainChannel::Nightly
+    } else {
+        ToolchainChannel::Stable
+    };
+
     // ── Run compile ───────────────────────────────────────────────────────────
     if cli.verbose {
         // Live streaming — compile handles output directly.
-        match compile(input, cli.release, true, true) {
+        match compile(input, cli.release, true, true, cli.target, channel) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("error: {e}");
@@ -220,7 +278,7 @@ fn main() {
         }
     } else {
         // Progress bars (decompress → compile → cleanup) are driven inside compile().
-        let result = compile(input, cli.release, false, true);
+        let result = compile(input, cli.release, false, true, cli.target, channel);
 
         match result {
             Ok(Some(_)) | Ok(None) => {}
