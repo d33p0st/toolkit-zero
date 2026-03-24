@@ -636,3 +636,7 @@ pub mod browser;
 #[cfg(feature = "signatures")]
 #[cfg_attr(docsrs, doc(cfg(feature = "signatures")))]
 pub mod signatures;
+
+#[cfg(feature = "compiler")]
+#[cfg_attr(docsrs, doc(cfg(feature = "compiler")))]
+pub mod compiler;
