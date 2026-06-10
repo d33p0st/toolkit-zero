@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 use toolkit_zero::browser::{launch, launch_default, Target};
 

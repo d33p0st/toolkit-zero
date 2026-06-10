@@ -57,9 +57,6 @@ zeroize = { version = "1", optional = true, features = ["derive"] }
 iced = { version = "0.14", optional = true, features = ["canvas", "tokio", "image"] }
 wry = { version = "0.54", features = ["fullscreen"], optional = true }
 raw-window-handle = { version = "0.6", optional = true }
-objc2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSImage"] }
-objc2-foundation = { version = "0.3", optional = true, features = ["NSData"] }
 tar     = { version = "0.4", optional = true }
 xz2        = { version = "0.1", optional = true }
 indicatif  = { version = "0.17", optional = true }
@@ -116,7 +113,7 @@ enc-timelock-async-keygen-input = ["enc-timelock-keygen-input", "dep:tokio", "to
 dependency-graph-build = ["dep:serde_json", "dep:sha2"]
 dependency-graph-capture = ["dep:serde_json", "dep:toolkit-zero-macros", "toolkit-zero-macros/dep-graph-capture"]
 browser = ["dep:iced", "dep:wry", "dep:raw-window-handle", "dep:tokio", "tokio/full",
-    "dep:chrono", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation",
+    "dep:chrono",
     "dep:reqwest", "reqwest/stream",
     "dep:argon2", "dep:chacha20poly1305", "dep:rand",
     "dep:base64", "dep:serde", "serde/derive", "dep:serde_json", "dep:zeroize"]
@@ -162,12 +159,18 @@ required-features = ["serialization"]
 name = "browser_macro"
 required-features = ["location"]
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2            = { version = "0.6" }
+objc2-app-kit    = { version = "0.3", features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", features = ["NSData"] }
+
 [build-dependencies]
 ureq = "2"
 sha2 = "0.10"
+winresource = "0.1"
 
 [workspace]
-members = ["testcrate", "toolkit-zero-macros"]
+members = ["toolkit-zero-macros"]
 # chacha20poly1305-wasm targets wasm32-unknown-unknown and cannot be a workspace
 # member (incompatible build target). It is compiled by build.rs when the
 # `location` or `location-browser` feature is active.

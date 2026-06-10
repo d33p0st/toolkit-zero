@@ -170,6 +170,10 @@ pub enum Message {
     VaultDelete(String, String),
     /// Inject credentials for the current page's domain.
     VaultFillPage,
+    /// Toggle the "Actions" dropdown menu in the toolbar.
+    ToggleActionsMenu,
+    /// Add the currently-active page to Quick Links (from the Actions menu).
+    AddQuickLink,
 }
 
 /// Determines which visual theme the browser uses.
@@ -432,6 +436,8 @@ pub struct BrowserState {
     vault_password_draft: String,
     /// Last vault status message shown to the user.
     vault_status: String,
+    /// Whether the "Actions" toolbar dropdown is currently open.
+    actions_menu_open: bool,
 }
 
 impl BrowserState {
@@ -499,6 +505,7 @@ impl BrowserState {
             vault_panel_open: false,
             vault_password_draft: String::new(),
             vault_status: String::new(),
+            actions_menu_open: false,
         };
         (state, Task::none())
     }
@@ -530,6 +537,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
         Message::Navigate => {
             state.autocomplete_visible = false;
             state.autocomplete_suggestions.clear();
+            state.actions_menu_open = false;
             let url = resolve_url(&state.address_input);
             navigate_current_tab(state, url);
             // Unfocus the address bar by focusing a nonexistent ID — the
@@ -633,6 +641,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::SelectTab(idx) => {
+            state.actions_menu_open = false;
             // Record when the previously active tab is backgrounded.
             if let Some(prev) = state.tabs.get_mut(state.active_tab) {
                 if state.active_tab != idx {
@@ -934,28 +943,6 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
                     Some("vault_fill")        => Task::done(Message::VaultFillPage),
                     _ => Task::none(),
                 };
-            }
-            // Feature 10: context-menu "Open in New Tab".
-            if msg.contains("\"open_in_new_tab\"") {
-                // Extract the URL field with the hand-rolled parser already
-                // used by handle_ipc().
-                let get_url = || -> Option<String> {
-                    let needle = "\"url\":";
-                    let start = msg.find(needle)? + needle.len();
-                    let rest = msg[start..].trim_start();
-                    if rest.starts_with('"') {
-                        let inner = &rest[1..];
-                        let end = inner.find('"')?;
-                        Some(inner[..end].to_string())
-                    } else {
-                        None
-                    }
-                };
-                if let Some(raw) = get_url() {
-                    let url = resolve_url(&raw);
-                    return Task::done(Message::OpenInNewTab(url));
-                }
-                return Task::none();
             }
             handle_ipc(state, &msg);
             Task::none()
@@ -1525,6 +1512,30 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::ToggleActionsMenu => {
+            state.actions_menu_open = !state.actions_menu_open;
+            Task::none()
+        }
+
+        Message::AddQuickLink => {
+            state.actions_menu_open = false;
+            if let Some(tab) = state.tabs.get(state.active_tab) {
+                let url   = tab.url.clone();
+                let title = tab.title.clone();
+                if !url.is_empty() && url != "tkz:home" {
+                    let links = quicklinks::add(url, title);
+                    // Refresh homepage quicklinks if that tab is active.
+                    if state.tabs.get(state.active_tab)
+                        .map(|t| t.url == "tkz:home")
+                        .unwrap_or(false)
+                    {
+                        inject_quicklinks_from(&links);
+                    }
+                }
+            }
+            Task::none()
+        }
+
         Message::VaultFillPage => {
             if let Some(v) = &state.vault {
                 let url = state.tabs.get(state.active_tab)
@@ -1918,6 +1929,40 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
         .on_press(Message::ToggleHistory)
         .style(move |_theme, _status| nav_btn_style(dark));
 
+    // ── Actions menu button ───────────────────────────────────────────────────
+    let actions_label_c = if state.actions_menu_open {
+        if dark { Color::from_rgb(0.58, 0.30, 1.0) } else { Color::from_rgb(0.40, 0.10, 0.85) }
+    } else {
+        icon_c
+    };
+    let actions_btn = Button::new(
+        Text::new("Actions ▾").size(11).color(actions_label_c),
+    )
+    .on_press(Message::ToggleActionsMenu)
+    .style(move |_theme, _status| button::Style {
+        background: if state.actions_menu_open {
+            Some(iced::Background::Color(
+                if dark { Color::from_rgba(0.467, 0.0, 1.0, 0.15) }
+                else    { Color::from_rgba(0.467, 0.0, 1.0, 0.10) }
+            ))
+        } else {
+            None
+        },
+        border: iced::Border {
+            color: if state.actions_menu_open {
+                Color::from_rgba(0.467, 0.0, 1.0, 0.35)
+            } else {
+                Color::TRANSPARENT
+            },
+            width: if state.actions_menu_open { 0.75 } else { 0.0 },
+            radius: 4.0.into(),
+        },
+        shadow: iced::Shadow::default(),
+        text_color: actions_label_c,
+        snap: false,
+    })
+    .padding(iced::Padding::from([3, 7]));
+
     let addr_bar_bg = if dark {
         Color::from_rgb(0.09, 0.09, 0.12)
     } else {
@@ -1992,6 +2037,8 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
             .push(dl_btn)
             .push(Space::new().width(Length::Fixed(2.0)))
             .push(hist_btn)
+            .push(Space::new().width(Length::Fixed(4.0)))
+            .push(actions_btn)
             .push(Space::new().width(Length::Fixed(6.0)))
             .align_y(alignment::Vertical::Center)
             .spacing(2),
@@ -2244,6 +2291,115 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
         Space::new().width(Length::Fill).height(Length::Fill).into()
     };
 
+    // ── Actions dropdown overlay ──────────────────────────────────────────────
+    let actions_layer: Element<Message> = if state.actions_menu_open {
+        let menu_bg = if dark {
+            Color::from_rgba(0.08, 0.08, 0.12, 0.97)
+        } else {
+            Color::from_rgba(0.97, 0.97, 0.99, 0.97)
+        };
+        let sep_c = if dark {
+            Color::from_rgba(1.0, 1.0, 1.0, 0.07)
+        } else {
+            Color::from_rgba(0.0, 0.0, 0.0, 0.07)
+        };
+        let on_homepage = state.tabs
+            .get(state.active_tab)
+            .map(|t| t.url == "tkz:home" || t.home_html.is_some())
+            .unwrap_or(true);
+
+        let item_text_c = if dark {
+            Color::from_rgb(0.82, 0.82, 0.90)
+        } else {
+            Color::from_rgb(0.18, 0.18, 0.28)
+        };
+        let dim_c = if dark {
+            Color::from_rgba(0.55, 0.55, 0.65, 0.55)
+        } else {
+            Color::from_rgba(0.45, 0.45, 0.55, 0.55)
+        };
+
+        // "Add to Quick Links" — disabled on the homepage.
+        let ql_item: Element<Message> = if on_homepage {
+            Container::new(
+                Text::new("⚡  Add to Quick Links")
+                    .size(12)
+                    .color(dim_c),
+            )
+            .width(Length::Fill)
+            .padding(iced::Padding::from([7, 14]))
+            .into()
+        } else {
+            Button::new(
+                Text::new("⚡  Add to Quick Links")
+                    .size(12)
+                    .color(item_text_c),
+            )
+            .on_press(Message::AddQuickLink)
+            .width(Length::Fill)
+            .padding(iced::Padding::from([7, 14]))
+            .style(move |_theme, status| button::Style {
+                background: match status {
+                    button::Status::Hovered | button::Status::Pressed => Some(
+                        iced::Background::Color(
+                            if dark { Color::from_rgba(0.467, 0.0, 1.0, 0.15) }
+                            else    { Color::from_rgba(0.467, 0.0, 1.0, 0.10) }
+                        )
+                    ),
+                    _ => None,
+                },
+                border: iced::Border::default(),
+                shadow: iced::Shadow::default(),
+                text_color: item_text_c,
+                snap: false,
+            })
+            .into()
+        };
+
+        let menu_panel = Container::new(
+            Column::new()
+                .push(ql_item)
+                .push(
+                    Container::new(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+                        .width(Length::Fill)
+                        .style(move |_| container::Style {
+                            background: Some(iced::Background::Color(sep_c)),
+                            ..Default::default()
+                        }),
+                )
+                .spacing(0),
+        )
+        .width(Length::Fixed(200.0))
+        .padding(iced::Padding::from([4, 0]))
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(menu_bg)),
+            border: iced::Border {
+                color: Color::from_rgba(0.467, 0.0, 1.0, 0.30),
+                width: 1.0,
+                radius: 7.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..Default::default()
+        });
+
+        Container::new(
+            Column::new()
+                .push(Space::new().height(Length::Fixed(ADDR_BAR_H)))
+                .push(menu_panel),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Right)
+        .padding(iced::Padding { top: 0.0, right: 6.0, bottom: 0.0, left: 0.0 })
+        .into()
+    } else {
+        Space::new().width(Length::Fill).height(Length::Fill).into()
+    };
+
     Stack::new()
         .push(main_layout)
         .push(loader_canvas)
@@ -2254,6 +2410,7 @@ pub fn view(state: &BrowserState) -> Element<'_, Message> {
         .push(find_bar_layer)
         .push(autocomplete_layer)
         .push(spatial_layer)
+        .push(actions_layer)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

@@ -1,4 +1,5 @@
 target
 *.lock
-testcrate
 .DS_Store
+.aider*
+.claude/

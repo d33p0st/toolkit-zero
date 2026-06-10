@@ -54,6 +54,20 @@ fn main() {
             std::fs::copy(&icon_src, &icon_dst)
                 .expect("failed to copy assets/app-icon.png to OUT_DIR");
             println!("cargo:rustc-cfg=has_app_icon");
+
+            // Embed the icon as a Windows PE resource so it appears in the
+            // taskbar, Alt+Tab, and Explorer — the runtime HICON alone is not
+            // enough for those contexts.
+            let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+            if target_os == "windows" {
+                let ico_path = out_dir.join("app-icon.ico");
+                write_ico_from_png(&icon_src, &ico_path);
+                let mut res = winresource::WindowsResource::new();
+                res.set_icon(ico_path.to_str().unwrap());
+                if let Err(e) = res.compile() {
+                    println!("cargo:warning=winresource: {e}");
+                }
+            }
         }
     }
 
@@ -155,6 +169,36 @@ fn main() {
         std::fs::copy(&prebuilt, &wasm_dst)
             .expect("failed to copy assets/chacha20poly1305.wasm to OUT_DIR");
     }
+}
+
+// ── Windows icon helper ───────────────────────────────────────────────────────
+
+/// Wraps a PNG file in a minimal ICO container (Vista+ format) so winresource
+/// can embed it as a PE resource without needing a separate `.ico` asset.
+fn write_ico_from_png(png_path: &Path, ico_path: &Path) {
+    let png = std::fs::read(png_path).expect("failed to read app-icon.png");
+    assert!(
+        png.len() >= 24 && &png[1..4] == b"PNG",
+        "assets/app-icon.png is not a valid PNG"
+    );
+    let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+
+    let mut ico: Vec<u8> = Vec::with_capacity(22 + png.len());
+    // ICONDIR (6 bytes): reserved=0, type=1 (icon), count=1
+    ico.extend_from_slice(&[0, 0, 1, 0, 1, 0]);
+    // ICONDIRENTRY (16 bytes)
+    ico.push(if w >= 256 { 0 } else { w as u8 }); // bWidth  (0 encodes 256)
+    ico.push(if h >= 256 { 0 } else { h as u8 }); // bHeight
+    ico.push(0); // bColorCount
+    ico.push(0); // bReserved
+    ico.extend_from_slice(&[1, 0]);  // wPlanes
+    ico.extend_from_slice(&[32, 0]); // wBitCount
+    ico.extend_from_slice(&(png.len() as u32).to_le_bytes()); // dwBytesInRes
+    ico.extend_from_slice(&22u32.to_le_bytes()); // dwImageOffset (6 + 16)
+    ico.extend_from_slice(&png);
+
+    std::fs::write(ico_path, &ico).expect("failed to write app-icon.ico");
 }
 
 // ── Compiler feature helpers ──────────────────────────────────────────────────

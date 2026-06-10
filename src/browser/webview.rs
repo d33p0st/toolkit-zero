@@ -92,79 +92,6 @@ const KEYBOARD_INIT_SCRIPT: &str = r#"
 })();
 "#;
 
-/// Init script that injects a custom context-menu item on every non-homepage
-/// page: "Add to Quick Links" and "Open in New Tab".
-const CONTEXT_MENU_INIT_SCRIPT: &str = r#"
-(function() {
-  // Remove the native context menu and replace with a minimal one that
-  // includes our "Add to Quick Links" action.
-  document.addEventListener('contextmenu', function(e) {
-    // Only add the custom menu item when we are NOT on the homepage.
-    if (window.location.protocol === 'about:' || window.__TKZ_HOME__) return;
-    e.preventDefault();
-    e.stopPropagation();
-    // We can't inject a native menu from JS, but we CAN offer a quick-add via
-    // a small floating overlay that appears at the cursor position.
-    var existing = document.getElementById('__tkz_ctx__');
-    if (existing) existing.remove();
-
-    var menu = document.createElement('div');
-    menu.id = '__tkz_ctx__';
-    menu.style.cssText = [
-      'position:fixed',
-      'z-index:2147483647',
-      'left:' + e.clientX + 'px',
-      'top:' + e.clientY + 'px',
-      'background:#1a1a24',
-      'border:1px solid rgba(120,0,255,0.35)',
-      'border-radius:6px',
-      'padding:4px 0',
-      'font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
-      'color:#ddd',
-      'box-shadow:0 4px 18px rgba(0,0,0,.6)',
-      'min-width:180px',
-      'user-select:none',
-    ].join(';');
-
-    var title = document.title || window.location.hostname;
-    var url   = window.location.href;
-
-    // Determine if the right-click target is a link.
-    var linkEl = e.target;
-    while (linkEl && linkEl.tagName !== 'A') linkEl = linkEl.parentElement;
-    var linkUrl = linkEl ? (linkEl.href || '') : '';
-
-    function makeItem(label, onclick) {
-      var item = document.createElement('div');
-      item.textContent = label;
-      item.style.cssText = 'padding:7px 14px;cursor:pointer;';
-      item.onmouseenter = function() { item.style.background='rgba(120,0,255,.18)'; };
-      item.onmouseleave = function() { item.style.background=''; };
-      item.onclick = function() { onclick(); menu.remove(); };
-      return item;
-    }
-
-    menu.appendChild(makeItem('⚡ Add to Quick Links', function() {
-      window.ipc.postMessage(JSON.stringify({type:'add_quicklink',url:url,title:title}));
-    }));
-
-    if (linkUrl) {
-      menu.appendChild(makeItem('⬡ Open in New Tab', function() {
-        window.ipc.postMessage(JSON.stringify({type:'open_in_new_tab',url:linkUrl}));
-      }));
-    }
-
-    document.body.appendChild(menu);
-
-    // Dismiss on any outside click.
-    var dismiss = function(ev) {
-      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', dismiss, true); }
-    };
-    document.addEventListener('mousedown', dismiss, true);
-  });
-})();
-"#;
-
 /// Init script that polyfills the Fullscreen API for WKWebView contexts.
 ///
 /// WKWebView disables `Element.requestFullscreen()` by default.  This script:
@@ -350,7 +277,6 @@ pub(super) fn create(
         .with_clipboard(true)
         .with_back_forward_navigation_gestures(true)
         .with_initialization_script(KEYBOARD_INIT_SCRIPT)
-        .with_initialization_script(CONTEXT_MENU_INIT_SCRIPT)
         .with_initialization_script(FULLSCREEN_INIT_SCRIPT)
         .with_initialization_script(BLOB_DOWNLOAD_SCRIPT)
         .with_ipc_handler(|req: wry::http::Request<String>| {
