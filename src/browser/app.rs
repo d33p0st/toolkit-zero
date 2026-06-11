@@ -537,7 +537,16 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
         Message::Navigate => {
             state.autocomplete_visible = false;
             state.autocomplete_suggestions.clear();
-            state.actions_menu_open = false;
+            if state.actions_menu_open {
+                state.actions_menu_open = false;
+                if !state.content_fullscreen {
+                    let right_w = right_panel_w(state);
+                    let (x, y, w, h) = content_bounds(
+                        state.window_size, state.tab_panel_w, right_w, 0.0,
+                    );
+                    webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+                }
+            }
             let url = resolve_url(&state.address_input);
             navigate_current_tab(state, url);
             // Unfocus the address bar by focusing a nonexistent ID — the
@@ -641,7 +650,16 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::SelectTab(idx) => {
-            state.actions_menu_open = false;
+            if state.actions_menu_open {
+                state.actions_menu_open = false;
+                if !state.content_fullscreen {
+                    let right_w = right_panel_w(state);
+                    let (x, y, w, h) = content_bounds(
+                        state.window_size, state.tab_panel_w, right_w, 0.0,
+                    );
+                    webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+                }
+            }
             // Record when the previously active tab is backgrounded.
             if let Some(prev) = state.tabs.get_mut(state.active_tab) {
                 if state.active_tab != idx {
@@ -714,7 +732,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
                 webview::set_bounds(0.0, 0.0, new_size.width as f64, new_size.height as f64);
             } else {
                 let right_w = right_panel_w(state);
-                let (x, y, w, h) = content_bounds(new_size, state.tab_panel_w, right_w);
+                let (x, y, w, h) = content_bounds(new_size, state.tab_panel_w, right_w, actions_extra_h(state));
                 webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
             }
             Task::none()
@@ -829,7 +847,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             // Shrink/restore webview so the iced history panel is not obscured
             // by the native OS webview layer sitting on top of iced.
             let right_w = right_panel_w(state);
-            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w, actions_extra_h(state));
             webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
             Task::none()
         }
@@ -850,7 +868,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             state.show_history = false;
             state.show_downloads = false;
             // Restore full webview width when all panels close.
-            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, 0.0);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, 0.0, actions_extra_h(state));
             webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
             navigate_current_tab(state, url);
             Task::none()
@@ -971,7 +989,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             state.show_history = false;
             state.show_downloads = !state.show_downloads;
             let right_w = right_panel_w(state);
-            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w, actions_extra_h(state));
             webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
             Task::none()
         }
@@ -1408,7 +1426,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             } else {
                 // Restore the webview to its normal content area.
                 let right_w = right_panel_w(state);
-                let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+                let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w, actions_extra_h(state));
                 webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
             }
             Task::none()
@@ -1427,7 +1445,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             // Close the map, restore the webview, and switch to the selected tab.
             state.spatial_map_open = false;
             let right_w = right_panel_w(state);
-            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w, actions_extra_h(state));
             webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
             if idx < state.tabs.len() {
                 return Task::done(Message::SelectTab(idx));
@@ -1441,7 +1459,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             state.show_history = false;
             state.show_downloads = false;
             let right_w = right_panel_w(state);
-            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w, actions_extra_h(state));
             webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
             Task::none()
         }
@@ -1449,7 +1467,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
             state.vault_panel_open = false;
             state.vault_password_draft.clear();
             let right_w = right_panel_w(state);
-            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+            let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w, actions_extra_h(state));
             webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
             Task::none()
         }
@@ -1514,11 +1532,26 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
         }
         Message::ToggleActionsMenu => {
             state.actions_menu_open = !state.actions_menu_open;
+            if !state.content_fullscreen {
+                let right_w = right_panel_w(state);
+                let (x, y, w, h) = content_bounds(
+                    state.window_size, state.tab_panel_w, right_w, actions_extra_h(state),
+                );
+                webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            }
             Task::none()
         }
 
         Message::AddQuickLink => {
             state.actions_menu_open = false;
+            // Restore WebView bounds (dropdown reserved space is no longer needed).
+            if !state.content_fullscreen {
+                let right_w = right_panel_w(state);
+                let (x, y, w, h) = content_bounds(
+                    state.window_size, state.tab_panel_w, right_w, 0.0,
+                );
+                webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
+            }
             if let Some(tab) = state.tabs.get(state.active_tab) {
                 let url   = tab.url.clone();
                 let title = tab.title.clone();
@@ -1646,7 +1679,7 @@ pub fn update(state: &mut BrowserState, message: Message) -> Task<Message> {
                 };
                 if (state.tab_panel_w - prev_w).abs() > 0.1 {
                     let right_w = right_panel_w(state);
-                    let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w);
+                    let (x, y, w, h) = content_bounds(state.window_size, state.tab_panel_w, right_w, actions_extra_h(state));
                     webview::set_bounds(x as f64, y as f64, w as f64, h as f64);
                 }
             }
@@ -2483,11 +2516,11 @@ pub fn theme(state: &BrowserState) -> Theme {
     if effective_dark(state.theme_mode) { Theme::Dark } else { Theme::Light }
 }
 
-pub fn content_bounds(window_size: Size, tab_panel_w: f32, history_w: f32) -> (f32, f32, f32, f32) {
+pub fn content_bounds(window_size: Size, tab_panel_w: f32, history_w: f32, top_extra: f32) -> (f32, f32, f32, f32) {
     let x = tab_panel_w + INSET;
-    let y = CHROME_H + INSET;
+    let y = CHROME_H + top_extra + INSET;
     let w = (window_size.width - tab_panel_w - history_w - 2.0 * INSET).max(0.0);
-    let h = (window_size.height - CHROME_H - 2.0 * INSET).max(0.0);
+    let h = (window_size.height - CHROME_H - top_extra - 2.0 * INSET).max(0.0);
     (x, y, w, h)
 }
 
@@ -2801,7 +2834,7 @@ fn create_webview_task(
     url: Option<String>,
     html: Option<String>,
 ) -> Task<()> {
-    let (cx, cy, cw, ch) = content_bounds(size, PANEL_COLLAPSED_W, 0.0);
+    let (cx, cy, cw, ch) = content_bounds(size, PANEL_COLLAPSED_W, 0.0, 0.0);
     window::run(id, move |window| {
         let raw = match window.window_handle() {
             Ok(h) => h.as_raw(),
@@ -3436,6 +3469,16 @@ fn vault_panel<'a>(
 /// Width of whichever right-side panel is currently open (0 if none).
 fn right_panel_w(state: &BrowserState) -> f32 {
     if state.show_history || state.show_downloads || state.vault_panel_open { 280.0 } else { 0.0 }
+}
+
+/// Height in logical pixels reserved below the address bar for the Actions
+/// dropdown.  When the dropdown is open the WebView is shifted down by this
+/// amount so iced can render the dropdown without it being obscured by the
+/// native OS child view.
+const ACTIONS_DROPDOWN_H: f32 = 40.0;
+
+fn actions_extra_h(state: &BrowserState) -> f32 {
+    if state.actions_menu_open { ACTIONS_DROPDOWN_H } else { 0.0 }
 }
 
 /// Open `path` with the system default application.
